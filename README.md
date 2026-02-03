@@ -36,11 +36,11 @@ SmolLM2는 본 프로젝트의 **참고 예제(reference implementation)** 입�
 ./scripts/run_smollm2_demo.sh
 ```
 
-* 기본 체크포인트: `HuggingFaceTB/SmolLM2-135M`
+* 기본 체크포인트: `HuggingFaceTB/SmolLM2-135M-Instruct`
 
 ### 3.2 한국어 미세조정
 
-학습용 텍스트 파일이 없으면, 기본 한국어 대화 데이터셋을 자동 다운로드하여 학습 파일을 생성합니다. (한 줄 = 한 샘플)
+학습용 텍스트 파일이 없으면, 기본 한국어 Instruct 데이터셋을 자동 다운로드하여 학습 파일을 생성합니다. (한 줄 = 한 샘플)
 
 ```bash
 ./scripts/run_smollm2_finetune.sh
@@ -48,11 +48,15 @@ SmolLM2는 본 프로젝트의 **참고 예제(reference implementation)** 입�
 
 #### 기본 동작
 
-* 학습 파일: `data/processed/korean_train.txt`
-* 체크포인트 저장: `checkpoints/smollm2-ko`
-* 기본 데이터셋: `ohilikeit/empathetic_dialogues_mutli_turn_ko`
+* 학습 파일: `data/processed/ko_instruct_train.txt`
+* 체크포인트 저장: `checkpoints/smollm2-ko-instruct`
+* 기본 데이터셋: `beomi/KoAlpaca-RealQA`
 * RAM/VRAM 크기에 맞춰 배치 크기 자동 설정
 * 기존 체크포인트 존재 시 재개 여부 질의 (`--resume-mode`로 제어 가능)
+
+#### 참고
+
+* 기본 데이터셋은 접근 동의가 필요한 경우가 있으므로 Hugging Face 로그인과 동의가 필요합니다.
 
 ### 3.3 한국어 성능 비교
 

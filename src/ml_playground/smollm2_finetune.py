@@ -48,11 +48,13 @@ class TextLineDataset(Dataset):
 
 
 def parse_args() -> argparse.Namespace:
+    # 커맨드라인 인자를 정의해 실행 흐름을 명확히 통제합니다.
+    # 기본값은 Instruct 미세조정에 맞춘 설정으로 구성합니다.
     parser = argparse.ArgumentParser(description="SmolLM2 한국어 미세조정")
     parser.add_argument(
         "--train-file",
         type=str,
-        default="data/processed/korean_train.txt",
+        default="data/processed/ko_instruct_train.txt",
         help="학습에 사용할 텍스트 파일(한 줄=한 샘플)",
     )
     parser.add_argument(
@@ -64,7 +66,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output-dir",
         type=str,
-        default="checkpoints/smollm2-ko",
+        default="checkpoints/smollm2-ko-instruct",
         help="모델 저장 경로",
     )
     parser.add_argument("--epochs", type=int, default=1, help="학습 에폭 수")
@@ -79,8 +81,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--dataset",
         type=str,
-        default="ohilikeit/empathetic_dialogues_mutli_turn_ko",
-        help="자동 다운로드에 사용할 데이터셋",
+        default="beomi/KoAlpaca-RealQA",
+        help="자동 다운로드에 사용할 데이터셋(접근 동의가 필요한 데이터셋 포함)",
     )
     parser.add_argument(
         "--dataset-split",
@@ -206,25 +208,57 @@ def build_training_lines(
     dataset_rows: list[dict[str, object]],
     max_samples: int,
 ) -> list[str]:
+    # 데이터셋의 다양한 스키마를 처리하기 위해 명시적 분기를 사용합니다.
+    # instruction/output, instruction/response, text 형태를 모두 지원합니다.
     lines: list[str] = []
     limit = max_samples if max_samples > 0 else len(dataset_rows)
     for row in dataset_rows[:limit]:
-        instruction = row.get("instruction")
-        output = row.get("output")
-        if isinstance(instruction, str) and isinstance(output, str):
-            combined = f"질문: {instruction} 답변: {output}"
-            line = sanitize_text(combined)
-            if line:
-                lines.append(line)
+        # 1) Instruct 스키마를 우선 처리합니다.
+        instruct_line = build_instruct_line(row)
+        if instruct_line:
+            lines.append(instruct_line)
             continue
-        text = row.get("text")
-        if isinstance(text, str):
-            line = sanitize_text(text)
-            if line:
-                lines.append(line)
+        # 2) 단일 텍스트 필드를 가진 데이터셋은 그대로 사용합니다.
+        text_line = build_text_line(row)
+        if text_line:
+            lines.append(text_line)
     if not lines:
         raise ValueError("데이터셋에서 유효한 텍스트를 만들 수 없습니다.")
     return lines
+
+
+def build_instruct_line(row: dict[str, object]) -> str | None:
+    # Instruct 데이터셋의 필드를 읽어 학습 문장을 구성합니다.
+    # 입력이 부족하면 None을 반환해 상위 로직에서 다른 스키마로 넘어가게 합니다.
+    instruction = row.get("instruction")
+    output = row.get("output")
+    response = row.get("response")
+    input_text = row.get("input")
+
+    if not isinstance(instruction, str):
+        return None
+    answer = output if isinstance(output, str) else response if isinstance(response, str) else None
+    if not isinstance(answer, str):
+        return None
+
+    # Instruct 튜닝용 포맷은 "질문/입력/답변"을 명시적으로 분리합니다.
+    # 입력이 없으면 질문과 답변만 사용해 불필요한 토큰을 줄입니다.
+    if isinstance(input_text, str) and input_text.strip():
+        combined = f"질문: {instruction} 입력: {input_text} 답변: {answer}"
+    else:
+        combined = f"질문: {instruction} 답변: {answer}"
+    line = sanitize_text(combined)
+    return line if line else None
+
+
+def build_text_line(row: dict[str, object]) -> str | None:
+    # text 필드를 그대로 사용하는 단순 스키마를 지원합니다.
+    # 공백 제거 후 비어 있으면 None을 반환합니다.
+    text = row.get("text")
+    if isinstance(text, str):
+        line = sanitize_text(text)
+        return line if line else None
+    return None
 
 
 def prepare_dataset(

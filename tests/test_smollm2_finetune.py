@@ -23,6 +23,7 @@ def test_build_training_lines_instruction_output() -> None:
     lines = finetune.build_training_lines(cast(list[dict[str, object]], rows), 0)
     assert lines[0].startswith("질문:")
     assert "답변:" in lines[0]
+    assert "입력:" not in lines[0]
 
 
 def test_build_training_lines_text_fallback() -> None:
@@ -32,6 +33,28 @@ def test_build_training_lines_text_fallback() -> None:
     ]
     lines = finetune.build_training_lines(cast(list[dict[str, object]], rows), 1)
     assert lines == ["안녕하세요"]
+
+
+def test_build_training_lines_instruction_response() -> None:
+    rows = [
+        {"instruction": "자기소개 해줘", "response": "안녕하세요. 도움을 드릴게요."},
+        {"instruction": "오늘 날씨 어때?", "response": "맑다고 해요."},
+    ]
+    lines = finetune.build_training_lines(cast(list[dict[str, object]], rows), 0)
+    assert lines[0].startswith("질문:")
+    assert "답변:" in lines[0]
+
+
+def test_build_training_lines_instruction_with_input() -> None:
+    rows = [
+        {
+            "instruction": "요약해줘",
+            "input": "이 문장은 요약 대상입니다.",
+            "response": "요약된 문장입니다.",
+        }
+    ]
+    lines = finetune.build_training_lines(cast(list[dict[str, object]], rows), 0)
+    assert "입력:" in lines[0]
 
 
 def test_read_lines(tmp_path) -> None:
