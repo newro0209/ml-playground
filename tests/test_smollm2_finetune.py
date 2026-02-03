@@ -95,6 +95,25 @@ def test_build_swapped_vocab_skips_special_tokens() -> None:
     assert swap_ids
 
 
+def test_apply_swapped_vocab_with_attribute_fallback() -> None:
+    class DummyModel:
+        def __init__(self) -> None:
+            self.vocab = {"a": 0, "b": 1, "ab": 2}
+            self.merges = [("a", "b")]
+
+    class DummyBackendTokenizer:
+        def __init__(self) -> None:
+            self.model = DummyModel()
+
+    class DummyTokenizer:
+        def __init__(self) -> None:
+            self.backend_tokenizer = DummyBackendTokenizer()
+
+    tokenizer = DummyTokenizer()
+    finetune.apply_swapped_vocab(tokenizer, ["a", "b", "ab"])
+    assert tokenizer.backend_tokenizer.model is not None
+
+
 def test_read_lines(tmp_path) -> None:
     path = tmp_path / "train.txt"
     path.write_text("\n안녕\n\n반갑\n", encoding="utf-8")

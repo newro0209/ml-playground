@@ -266,14 +266,17 @@ def apply_swapped_vocab(
         raise ValueError("Fast 토크나이저가 아니어서 vocab 교체를 지원하지 않습니다.")
     backend_tokenizer = tokenizer.backend_tokenizer
     model = getattr(backend_tokenizer, "model", None)
-    if model is None or not hasattr(model, "get_vocab"):
+    if model is None:
         raise ValueError("토크나이저 모델에서 vocab 정보를 가져올 수 없습니다.")
-    vocab = model.get_vocab()
+    # 일부 tokenizers 버전은 get_vocab/get_merges 대신 속성 접근만 제공합니다.
+    vocab = model.get_vocab() if hasattr(model, "get_vocab") else getattr(model, "vocab", None)
     if not isinstance(vocab, dict):
         raise ValueError("vocab 정보가 dict 형태가 아닙니다.")
-    merges = None
-    if hasattr(model, "get_merges"):
-        merges = model.get_merges()
+    merges = (
+        model.get_merges()
+        if hasattr(model, "get_merges")
+        else getattr(model, "merges", None)
+    )
     if merges is None:
         raise ValueError("BPE merges 정보를 가져올 수 없습니다.")
     if len(new_id_to_token) != len(vocab):
