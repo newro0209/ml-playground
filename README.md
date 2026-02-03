@@ -20,6 +20,11 @@ A. `src` 패키지 구조라서 편집 가능 설치 또는 `PYTHONPATH` 설정�
 - 간단 실행: `PYTHONPATH=./src python -m ml_playground.smollm2_demo`  
 - 영구 해결: `pip install -e .`
 
+Q. `git push`가 인증 오류로 실패해요.  
+A. GitHub CLI 인증이 되어 있다면 HTTPS 원격에서 토큰 입력 없이 push할 수 있습니다.  
+- 확인: `gh auth status`  
+- 미인증이면: `gh auth login` 후 다시 `git push -u origin main`
+
 ## 디렉터리 구조
 - `configs/` 실험 설정(YAML)
 - `data/` 데이터 저장소
