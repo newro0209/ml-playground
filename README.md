@@ -1,0 +1,38 @@
+# ml-playground
+
+여러 모델의 미세조정, 헤드 추가, 구조 변경 등 실험을 빠르게 반복하기 위한 프로젝트 골격입니다.
+
+## 빠른 시작
+1. 가상환경 활성화
+2. 의존성 설치 (필요 시 `pyproject.toml` 기준)
+3. `configs/`에서 실험 설정을 만들고 `src/ml_playground/train.py`로 실행
+
+## SmolLM2 135M Base 빠른 실행
+```bash
+./scripts/run_smollm2_demo.sh
+```
+
+기본 체크포인트는 `HuggingFaceTB/SmolLM2-135M`입니다.
+
+## Q&A
+Q. `ModuleNotFoundError: No module named 'ml_playground'`가 발생해요.  
+A. `src` 패키지 구조라서 편집 가능 설치 또는 `PYTHONPATH` 설정이 필요합니다.  
+- 간단 실행: `PYTHONPATH=./src python -m ml_playground.smollm2_demo`  
+- 영구 해결: `pip install -e .`
+
+## 디렉터리 구조
+- `configs/` 실험 설정(YAML)
+- `data/` 데이터 저장소
+- `checkpoints/` 모델 체크포인트
+- `experiments/` 실험 결과(로그, 메트릭)
+- `notebooks/` 분석/프로토타입
+- `scripts/` 실행 스크립트
+- `src/` 파이썬 패키지 코드
+- `tests/` 테스트
+- `docs/` 문서
+- `tools/` 실험 보조 도구
+
+## 기본 규칙
+- 실험 산출물은 `experiments/`와 `checkpoints/` 아래에만 저장
+- 원본 데이터는 `data/raw/`, 가공 데이터는 `data/processed/`
+- 공통 유틸은 `src/ml_playground/utils/`에 배치

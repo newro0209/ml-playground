@@ -1,0 +1,27 @@
+# 파이썬
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+.pytest_cache/
+.venv/
+
+# 편집기
+.vscode/
+.idea/
+
+# 데이터/실험 산출물
+/data/*
+!/data/.gitkeep
+/experiments/*
+!/experiments/.gitkeep
+/checkpoints/*
+!/checkpoints/.gitkeep
+
+# 노트북 체크포인트
+.ipynb_checkpoints/
+
+# 환경 변수
+.env

@@ -1,0 +1,30 @@
+[project]
+name = "ml-playground"
+version = "0.1.0"
+description = "미세조정/모델 구조 실험을 위한 플레이그라운드"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "torch",
+  "transformers",
+  "safetensors",
+]
+
+[project.optional-dependencies]
+dev = [
+  "ruff",
+  "pyright",
+  "pytest",
+]
+
+[tool.ruff]
+line-length = 100
+src = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.pyright]
+typeCheckingMode = "basic"
+reportMissingTypeStubs = "none"

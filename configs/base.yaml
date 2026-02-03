@@ -1,0 +1,13 @@
+# 기본 실험 설정
+seed: 42
+train:
+  epochs: 3
+  batch_size: 32
+  lr: 0.0003
+model:
+  name: baseline
+  hidden_size: 256
+paths:
+  data_dir: data
+  checkpoints_dir: checkpoints
+  experiments_dir: experiments
