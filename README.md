@@ -54,6 +54,24 @@ SmolLM2는 본 프로젝트의 **참고 예제(reference implementation)** 입�
 * RAM/VRAM 크기에 맞춰 배치 크기 자동 설정
 * 기존 체크포인트 존재 시 재개 여부 질의 (`--resume-mode`로 제어 가능)
 
+### 3.3 한국어 성능 비교
+
+원본 모델과 미세조정 모델의 **퍼플렉시티 기반 비교**를 수행합니다.
+
+```bash
+./scripts/run_smollm2_eval.sh
+```
+
+기본 평가 파일은 `data/processed/korean_eval.txt`이며, 파일이 없으면 내장 샘플로 평가합니다.
+
+### 3.4 GGUF 변환
+
+`llama.cpp`의 변환 스크립트를 사용해 GGUF로 변환합니다.
+
+```bash
+LLAMA_CPP_DIR=/path/to/llama.cpp ./scripts/run_smollm2_gguf.sh
+```
+
 ---
 
 ## 4. 디렉터리 구조와 책임
