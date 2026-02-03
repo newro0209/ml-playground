@@ -76,34 +76,37 @@ def test_extract_candidate_tokens_limit() -> None:
     assert tokens == ["안녕", "반가워"]
 
 
-def test_resolve_swap_range_invalid() -> None:
-    with pytest.raises(ValueError):
-        finetune.resolve_swap_range(10, 0.7, 0.5)
+def test_contains_korean() -> None:
+    assert finetune.contains_korean("한글토큰") is True
+    assert finetune.contains_korean("english") is False
 
 
 def test_build_swapped_vocab_skips_special_tokens() -> None:
-    id_to_token = ["<pad>", "토큰A", "토큰B", "토큰C"]
-    candidate_tokens = ["새토큰1", "새토큰2"]
+    id_to_token = ["<pad>", "tokA", "123", "##"]
+    candidate_tokens = ["한글1", "한글2"]
     new_tokens, swap_ids = finetune.build_swapped_vocab(
         id_to_token=id_to_token,
         candidate_tokens=candidate_tokens,
-        start=0,
-        end=3,
         special_tokens={"<pad>"},
     )
     assert new_tokens[0] == "<pad>"
     assert swap_ids
 
 
-def test_apply_swapped_vocab_with_attribute_fallback() -> None:
-    class DummyModel:
-        def __init__(self) -> None:
-            self.vocab = {"a": 0, "b": 1, "ab": 2}
-            self.merges = [("a", "b")]
-
+def test_apply_swapped_vocab_with_backend_json() -> None:
     class DummyBackendTokenizer:
-        def __init__(self) -> None:
-            self.model = DummyModel()
+        def get_vocab(self) -> dict[str, int]:
+            return {"a": 0, "b": 1, "ab": 2}
+
+        def to_str(self) -> str:
+            return (
+                "{"
+                "\"model\": {"
+                "\"vocab\": {\"a\": 0, \"b\": 1, \"ab\": 2},"
+                "\"merges\": [[\"a\", \"b\"]]"
+                "}"
+                "}"
+            )
 
     class DummyTokenizer:
         def __init__(self) -> None:

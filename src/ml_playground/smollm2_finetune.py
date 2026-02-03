@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 from pathlib import Path
 from typing import cast
@@ -141,18 +142,6 @@ def parse_args() -> argparse.Namespace:
         help="데이터셋 토큰으로 토크나이저 일부를 교체",
     )
     parser.add_argument(
-        "--tokenizer-swap-min-pct",
-        type=float,
-        default=0.5,
-        help="교체 시작 비율(예: 0.5)",
-    )
-    parser.add_argument(
-        "--tokenizer-swap-max-pct",
-        type=float,
-        default=0.7,
-        help="교체 종료 비율(예: 0.7)",
-    )
-    parser.add_argument(
         "--tokenizer-swap-max-tokens",
         type=int,
         default=2000,
@@ -192,6 +181,8 @@ def extract_candidate_tokens(
             token = raw_token.strip()
             if not token:
                 continue
+            if not contains_korean(token):
+                continue
             if token in seen:
                 continue
             seen.add(token)
@@ -201,43 +192,37 @@ def extract_candidate_tokens(
     return tokens
 
 
-def resolve_swap_range(
-    vocab_size: int,
-    min_pct: float,
-    max_pct: float,
-) -> tuple[int, int]:
-    # 토크나이저의 교체 구간을 비율로 계산합니다.
-    # 잘못된 비율 값은 명시적으로 실패시켜 오류를 드러냅니다.
-    if vocab_size <= 0:
-        raise ValueError("vocab_size는 1 이상이어야 합니다.")
-    if not (0.0 <= min_pct < max_pct <= 1.0):
-        raise ValueError("교체 비율은 0.0 <= min < max <= 1.0 이어야 합니다.")
-    start = int(vocab_size * min_pct)
-    end = int(vocab_size * max_pct)
-    if start >= end:
-        raise ValueError("교체 구간이 비어 있습니다.")
-    return start, end
+def contains_korean(token: str) -> bool:
+    # 한글 범위를 포함하는지 확인해 한국어 토큰을 추출합니다.
+    for char in token:
+        if "\uac00" <= char <= "\ud7a3":
+            return True
+    return False
+
+
+def is_english_token(token: str) -> bool:
+    # 영문 토큰 여부를 판별합니다.
+    # 토크나이저 접두어(Ġ, ▁ 등)는 제거한 뒤 검사합니다.
+    stripped = token.lstrip("Ġ▁")
+    if not stripped:
+        return False
+    return stripped.isascii() and stripped.isalpha()
 
 
 def build_swapped_vocab(
     id_to_token: list[str],
     candidate_tokens: list[str],
-    start: int,
-    end: int,
     special_tokens: set[str],
 ) -> tuple[list[str], list[int]]:
-    # 지정된 구간을 후보 토큰으로 교체한 새로운 vocab 리스트를 만듭니다.
+    # 영어 토큰은 유지하고, 그 외 영역에 한국어 후보 토큰을 교체합니다.
     # 특수 토큰은 교체하지 않도록 보호합니다.
-    if start < 0 or end > len(id_to_token):
-        raise ValueError("교체 범위가 vocab 크기를 벗어났습니다.")
-    if start >= end:
-        raise ValueError("교체 범위가 비어 있습니다.")
     new_tokens = list(id_to_token)
     swapped_ids: list[int] = []
     candidate_index = 0
-    for vocab_id in range(start, end):
-        current_token = id_to_token[vocab_id]
+    for vocab_id, current_token in enumerate(id_to_token):
         if current_token in special_tokens:
+            continue
+        if is_english_token(current_token):
             continue
         while candidate_index < len(candidate_tokens):
             candidate = candidate_tokens[candidate_index]
@@ -256,6 +241,53 @@ def build_swapped_vocab(
     return new_tokens, swapped_ids
 
 
+def normalize_merges(merges: object) -> list[tuple[str, str]]:
+    # merges를 (str, str) 튜플 리스트로 정규화합니다.
+    if not isinstance(merges, list):
+        raise ValueError("BPE merges 정보가 list 형태가 아닙니다.")
+    normalized: list[tuple[str, str]] = []
+    for item in merges:
+        if isinstance(item, tuple) and len(item) == 2:
+            left, right = item
+        elif isinstance(item, list) and len(item) == 2:
+            left, right = item
+        else:
+            raise ValueError("BPE merges 요소의 형태가 올바르지 않습니다.")
+        if not isinstance(left, str) or not isinstance(right, str):
+            raise ValueError("BPE merges 요소는 문자열이어야 합니다.")
+        normalized.append((left, right))
+    return normalized
+
+
+def extract_backend_vocab_merges(backend_tokenizer) -> tuple[dict[str, int], list[tuple[str, str]]]:
+    # backend_tokenizer에서 vocab/merges를 우선적으로 추출합니다.
+    if hasattr(backend_tokenizer, "get_vocab"):
+        vocab = backend_tokenizer.get_vocab()
+        if not isinstance(vocab, dict):
+            raise ValueError("backend_tokenizer.get_vocab 결과가 dict가 아닙니다.")
+        merges = None
+        if hasattr(backend_tokenizer, "to_str"):
+            raw = backend_tokenizer.to_str()
+            parsed = json.loads(raw)
+            model = parsed.get("model", {})
+            merges = model.get("merges")
+        if merges is None:
+            raise ValueError("backend_tokenizer에서 merges 정보를 찾을 수 없습니다.")
+        return vocab, normalize_merges(merges)
+    if hasattr(backend_tokenizer, "to_str"):
+        raw = backend_tokenizer.to_str()
+        parsed = json.loads(raw)
+        model = parsed.get("model", {})
+        vocab = model.get("vocab")
+        merges = model.get("merges")
+        if not isinstance(vocab, dict):
+            raise ValueError("backend_tokenizer JSON에서 vocab을 찾지 못했습니다.")
+        if merges is None:
+            raise ValueError("backend_tokenizer JSON에서 merges를 찾지 못했습니다.")
+        return vocab, normalize_merges(merges)
+    raise ValueError("backend_tokenizer에서 vocab 정보를 가져올 수 없습니다.")
+
+
 def apply_swapped_vocab(
     tokenizer: PreTrainedTokenizerBase,
     new_id_to_token: list[str],
@@ -265,20 +297,7 @@ def apply_swapped_vocab(
     if not hasattr(tokenizer, "backend_tokenizer"):
         raise ValueError("Fast 토크나이저가 아니어서 vocab 교체를 지원하지 않습니다.")
     backend_tokenizer = tokenizer.backend_tokenizer
-    model = getattr(backend_tokenizer, "model", None)
-    if model is None:
-        raise ValueError("토크나이저 모델에서 vocab 정보를 가져올 수 없습니다.")
-    # 일부 tokenizers 버전은 get_vocab/get_merges 대신 속성 접근만 제공합니다.
-    vocab = model.get_vocab() if hasattr(model, "get_vocab") else getattr(model, "vocab", None)
-    if not isinstance(vocab, dict):
-        raise ValueError("vocab 정보가 dict 형태가 아닙니다.")
-    merges = (
-        model.get_merges()
-        if hasattr(model, "get_merges")
-        else getattr(model, "merges", None)
-    )
-    if merges is None:
-        raise ValueError("BPE merges 정보를 가져올 수 없습니다.")
+    vocab, merges = extract_backend_vocab_merges(backend_tokenizer)
     if len(new_id_to_token) != len(vocab):
         raise ValueError("vocab 크기가 일치하지 않아 교체를 중단합니다.")
     # 기존 id 체계를 유지하면서 token 문자열만 교체합니다.
@@ -315,8 +334,6 @@ def swap_tokenizer_with_dataset(
     tokenizer: PreTrainedTokenizerBase,
     model: PreTrainedModel,
     lines: list[str],
-    min_pct: float,
-    max_pct: float,
     max_tokens: int,
 ) -> list[int]:
     # 데이터셋 기반으로 토크나이저 vocab을 일부 교체합니다.
@@ -328,7 +345,8 @@ def swap_tokenizer_with_dataset(
     if not isinstance(vocab, dict):
         raise ValueError("tokenizer.get_vocab 결과가 dict가 아닙니다.")
     vocab_size = len(vocab)
-    start, end = resolve_swap_range(vocab_size, min_pct, max_pct)
+    if vocab_size == 0:
+        raise ValueError("tokenizer vocab이 비어 있습니다.")
     id_to_token = [""] * vocab_size
     for token, idx in vocab.items():
         if 0 <= idx < vocab_size:
@@ -337,14 +355,14 @@ def swap_tokenizer_with_dataset(
     new_id_to_token, swap_ids = build_swapped_vocab(
         id_to_token=id_to_token,
         candidate_tokens=candidate_tokens,
-        start=start,
-        end=end,
         special_tokens=special_tokens,
     )
     apply_swapped_vocab(tokenizer, new_id_to_token)
     model.resize_token_embeddings(len(tokenizer))
     reinitialize_embeddings(model, swap_ids)
     return swap_ids
+
+
 def resolve_total_ram_gb() -> float:
     if hasattr(os, "sysconf"):
         try:
@@ -597,8 +615,6 @@ def main() -> None:
             tokenizer=tokenizer,
             model=model,
             lines=lines,
-            min_pct=args.tokenizer_swap_min_pct,
-            max_pct=args.tokenizer_swap_max_pct,
             max_tokens=args.tokenizer_swap_max_tokens,
         )
         print(f"토크나이저 교체 완료: {len(swap_ids)}개 토큰")
