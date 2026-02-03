@@ -9,13 +9,15 @@ from typing import cast
 
 import torch
 from torch.utils.data import DataLoader, Dataset
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedModel, PreTrainedTokenizerBase
 
 
 class TextLineDataset(Dataset):
     """텍스트 라인 기반 데이터셋."""
 
-    def __init__(self, lines: list[str], tokenizer: AutoTokenizer, max_length: int) -> None:
+    def __init__(
+        self, lines: list[str], tokenizer: PreTrainedTokenizerBase, max_length: int
+    ) -> None:
         self._lines = lines
         self._tokenizer = tokenizer
         self._max_length = max_length
@@ -240,7 +242,11 @@ def load_hf_dataset(dataset_name: str, split_name: str) -> list[dict[str, object
     return cast(list[dict[str, object]], list(dataset))
 
 
-def save_checkpoint(model: AutoModelForCausalLM, tokenizer: AutoTokenizer, output_dir: Path) -> None:
+def save_checkpoint(
+    model: PreTrainedModel,
+    tokenizer: PreTrainedTokenizerBase,
+    output_dir: Path,
+) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     model.save_pretrained(output_dir.as_posix())
     tokenizer.save_pretrained(output_dir.as_posix())
@@ -310,11 +316,19 @@ def main() -> None:
 
     if resume:
         print(f"체크포인트에서 재개합니다: {output_dir}")
-        tokenizer = AutoTokenizer.from_pretrained(output_dir.as_posix())
-        model = AutoModelForCausalLM.from_pretrained(output_dir.as_posix())
+        tokenizer = cast(
+            PreTrainedTokenizerBase, AutoTokenizer.from_pretrained(output_dir.as_posix())
+        )
+        model = cast(
+            PreTrainedModel, AutoModelForCausalLM.from_pretrained(output_dir.as_posix())
+        )
     else:
-        tokenizer = AutoTokenizer.from_pretrained(args.checkpoint)
-        model = AutoModelForCausalLM.from_pretrained(args.checkpoint)
+        tokenizer = cast(
+            PreTrainedTokenizerBase, AutoTokenizer.from_pretrained(args.checkpoint)
+        )
+        model = cast(
+            PreTrainedModel, AutoModelForCausalLM.from_pretrained(args.checkpoint)
+        )
     if tokenizer.pad_token_id is None:
         if tokenizer.eos_token is None:
             raise ValueError("pad_token_id 설정을 위해 eos_token이 필요합니다.")
