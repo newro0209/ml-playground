@@ -9,6 +9,8 @@ from typing import cast
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedModel, PreTrainedTokenizerBase
 
+from ml_playground.smollm2_common import resolve_device
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="SmolLM2 한국어 성능 비교")
@@ -49,12 +51,6 @@ def parse_args() -> argparse.Namespace:
         help="장치 선택(auto|cpu|cuda)",
     )
     return parser.parse_args()
-
-
-def resolve_device(device: str) -> torch.device:
-    if device == "auto":
-        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    return torch.device(device)
 
 
 def read_eval_lines(path: Path, max_samples: int) -> list[str]:

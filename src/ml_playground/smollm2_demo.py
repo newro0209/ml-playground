@@ -9,6 +9,8 @@ from typing import cast
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+from ml_playground.smollm2_common import resolve_device
+
 
 def parse_args() -> argparse.Namespace:
     # 데모 실행에 필요한 인자를 정의하고 기본값을 명시합니다.
@@ -44,13 +46,6 @@ def parse_args() -> argparse.Namespace:
         help="장치 선택(auto|cpu|cuda)",
     )
     return parser.parse_args()
-
-
-def resolve_device(device: str) -> torch.device:
-    # auto 선택 시 사용 가능한 장치를 우선합니다.
-    if device == "auto":
-        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    return torch.device(device)
 
 
 def read_prompts(path: Path) -> list[str]:

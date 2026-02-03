@@ -16,6 +16,8 @@ from transformers import (
     PreTrainedTokenizerBase,
 )
 
+from ml_playground.smollm2_common import resolve_device
+
 
 class TextLineDataset(Dataset):
     """텍스트 라인 기반 데이터셋."""
@@ -134,13 +136,6 @@ def parse_args() -> argparse.Namespace:
         help="중단 이후 재개 여부(ask|always|never)",
     )
     return parser.parse_args()
-
-
-def resolve_device(device: str) -> torch.device:
-    # auto 선택 시 사용 가능한 장치를 우선합니다.
-    if device == "auto":
-        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    return torch.device(device)
 
 
 def read_lines(path: Path) -> list[str]:
