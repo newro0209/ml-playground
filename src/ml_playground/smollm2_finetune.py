@@ -115,6 +115,13 @@ def parse_args() -> argparse.Namespace:
         default=0,
         help="체크포인트 저장 스텝 간격(0이면 에폭 종료 시만 저장)",
     )
+    parser.add_argument(
+        "--resume-mode",
+        type=str,
+        default="ask",
+        choices=["ask", "always", "never"],
+        help="중단 이후 재개 여부(ask|always|never)",
+    )
     return parser.parse_args()
 
 
@@ -239,6 +246,37 @@ def save_checkpoint(model: AutoModelForCausalLM, tokenizer: AutoTokenizer, outpu
     tokenizer.save_pretrained(output_dir.as_posix())
 
 
+def save_trainer_state(
+    output_dir: Path,
+    epoch: int,
+    global_step: int,
+    optimizer: torch.optim.Optimizer,
+) -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    state = {
+        "epoch": epoch,
+        "global_step": global_step,
+        "optimizer_state": optimizer.state_dict(),
+    }
+    torch.save(state, output_dir / "trainer_state.pt")
+
+
+def load_trainer_state(output_dir: Path) -> dict[str, object]:
+    state_path = output_dir / "trainer_state.pt"
+    if not state_path.exists():
+        return {}
+    return cast(dict[str, object], torch.load(state_path, map_location="cpu"))
+
+
+def has_resume_checkpoint(output_dir: Path) -> bool:
+    return (output_dir / "config.json").exists()
+
+
+def ask_resume(input_func) -> bool:
+    answer = input_func("이전 학습을 이어서 진행할까요? [y/N]: ").strip().lower()
+    return answer in {"y", "yes"}
+
+
 def main() -> None:
     args = parse_args()
 
@@ -247,6 +285,14 @@ def main() -> None:
     device = resolve_device(args.device)
 
     torch.manual_seed(42)
+
+    resume_available = has_resume_checkpoint(output_dir)
+    resume = False
+    if resume_available:
+        if args.resume_mode == "always":
+            resume = True
+        elif args.resume_mode == "ask":
+            resume = ask_resume(input)
 
     if args.auto_batch_size or args.batch_size <= 0:
         args.batch_size = suggest_batch_size(device)
@@ -262,13 +308,18 @@ def main() -> None:
             max_samples=args.dataset_max_samples,
         )
 
-    tokenizer = AutoTokenizer.from_pretrained(args.checkpoint)
+    if resume:
+        print(f"체크포인트에서 재개합니다: {output_dir}")
+        tokenizer = AutoTokenizer.from_pretrained(output_dir.as_posix())
+        model = AutoModelForCausalLM.from_pretrained(output_dir.as_posix())
+    else:
+        tokenizer = AutoTokenizer.from_pretrained(args.checkpoint)
+        model = AutoModelForCausalLM.from_pretrained(args.checkpoint)
     if tokenizer.pad_token_id is None:
         if tokenizer.eos_token is None:
             raise ValueError("pad_token_id 설정을 위해 eos_token이 필요합니다.")
         tokenizer.pad_token = tokenizer.eos_token
 
-    model = AutoModelForCausalLM.from_pretrained(args.checkpoint)
     torch.nn.Module.to(model, device)
 
     lines = read_lines(train_path)
@@ -276,10 +327,22 @@ def main() -> None:
     dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True, drop_last=True)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
-
+    start_epoch = 0
     global_step = 0
+    if resume:
+        state = load_trainer_state(output_dir)
+        epoch_value = state.get("epoch")
+        step_value = state.get("global_step")
+        optimizer_state = state.get("optimizer_state")
+        if isinstance(epoch_value, int):
+            start_epoch = epoch_value
+        if isinstance(step_value, int):
+            global_step = step_value
+        if isinstance(optimizer_state, dict):
+            optimizer.load_state_dict(optimizer_state)
+
     model.train()
-    for epoch in range(args.epochs):
+    for epoch in range(start_epoch, args.epochs):
         progress = build_progress_bar(dataloader, f"에폭 {epoch + 1}/{args.epochs}")
         for step, batch in enumerate(progress):
             input_ids = cast(torch.Tensor, batch["input_ids"]).to(device)
@@ -302,10 +365,12 @@ def main() -> None:
                 set_progress_postfix(progress, loss.item())
             if args.save_every > 0 and global_step % args.save_every == 0 and global_step > 0:
                 save_checkpoint(model, tokenizer, output_dir)
+                save_trainer_state(output_dir, epoch, global_step, optimizer)
 
             global_step += 1
 
         save_checkpoint(model, tokenizer, output_dir)
+        save_trainer_state(output_dir, epoch + 1, global_step, optimizer)
 
     print(f"학습 완료. 저장 위치: {output_dir}")
 

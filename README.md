@@ -24,6 +24,7 @@
 기본 학습 파일은 `data/processed/korean_train.txt`이며, 학습 결과는 `checkpoints/smollm2-ko`에 저장됩니다.
 기본 데이터셋은 Hugging Face의 `ohilikeit/empathetic_dialogues_mutli_turn_ko`이며, 필요하면 인자로 변경할 수 있습니다.
 기본 실행은 RAM/VRAM 크기에 맞춰 배치 크기를 자동으로 설정합니다.
+기존 체크포인트가 있으면 학습 재개 여부를 물어봅니다. (`--resume-mode`로 제어 가능)
 
 ## Q&A
 Q. `ModuleNotFoundError: No module named 'ml_playground'`가 발생해요.  

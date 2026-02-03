@@ -56,3 +56,17 @@ def test_prepare_dataset_writes_file(monkeypatch, tmp_path) -> None:
     content = train_path.read_text(encoding="utf-8")
     assert "질문:" in content
     assert "답변:" in content
+
+
+def test_ask_resume_yes() -> None:
+    def fake_input(_: str) -> str:
+        return "y"
+
+    assert finetune.ask_resume(fake_input) is True
+
+
+def test_ask_resume_no() -> None:
+    def fake_input(_: str) -> str:
+        return "n"
+
+    assert finetune.ask_resume(fake_input) is False
