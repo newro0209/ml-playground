@@ -57,6 +57,19 @@ def test_build_training_lines_instruction_with_input() -> None:
     assert "입력:" in lines[0]
 
 
+def test_build_training_lines_question_answer() -> None:
+    rows = [
+        {
+            "custom_id": "request-0",
+            "question": "파이썬 스네이크 게임 만들어줘",
+            "answer": "기본 게임 루프부터 설명할게요.",
+        }
+    ]
+    lines = finetune.build_training_lines(cast(list[dict[str, object]], rows), 0)
+    assert lines[0].startswith("질문:")
+    assert "답변:" in lines[0]
+
+
 def test_read_lines(tmp_path) -> None:
     path = tmp_path / "train.txt"
     path.write_text("\n안녕\n\n반갑\n", encoding="utf-8")

@@ -9,7 +9,12 @@ from typing import cast
 
 import torch
 from torch.utils.data import DataLoader, Dataset
-from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedModel, PreTrainedTokenizerBase
+from transformers import (
+    AutoModelForCausalLM,
+    AutoTokenizer,
+    PreTrainedModel,
+    PreTrainedTokenizerBase,
+)
 
 
 class TextLineDataset(Dataset):
@@ -70,7 +75,9 @@ def parse_args() -> argparse.Namespace:
         help="모델 저장 경로",
     )
     parser.add_argument("--epochs", type=int, default=1, help="학습 에폭 수")
-    parser.add_argument("--batch-size", type=int, default=0, help="배치 크기(0이면 자동)")
+    parser.add_argument(
+        "--batch-size", type=int, default=0, help="배치 크기(0이면 자동)"
+    )
     parser.add_argument(
         "--auto-batch-size",
         action="store_true",
@@ -130,6 +137,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def resolve_device(device: str) -> torch.device:
+    # auto 선택 시 사용 가능한 장치를 우선합니다.
     if device == "auto":
         return torch.device("cuda" if torch.cuda.is_available() else "cpu")
     return torch.device(device)
@@ -230,23 +238,41 @@ def build_training_lines(
 def build_instruct_line(row: dict[str, object]) -> str | None:
     # Instruct 데이터셋의 필드를 읽어 학습 문장을 구성합니다.
     # 입력이 부족하면 None을 반환해 상위 로직에서 다른 스키마로 넘어가게 합니다.
+    # 데이터셋마다 필드명이 다르므로 질문/응답 후보를 모두 확인합니다.
     instruction = row.get("instruction")
+    question = row.get("question")
     output = row.get("output")
     response = row.get("response")
+    answer_text = row.get("answer")
     input_text = row.get("input")
 
-    if not isinstance(instruction, str):
+    # 질문 필드가 없으면 Instruct 스키마로 처리하지 않습니다.
+    prompt = (
+        instruction
+        if isinstance(instruction, str)
+        else question if isinstance(question, str) else None
+    )
+    if not isinstance(prompt, str):
         return None
-    answer = output if isinstance(output, str) else response if isinstance(response, str) else None
+    # 응답 필드도 여러 후보를 허용합니다.
+    answer = (
+        output
+        if isinstance(output, str)
+        else (
+            response
+            if isinstance(response, str)
+            else answer_text if isinstance(answer_text, str) else None
+        )
+    )
     if not isinstance(answer, str):
         return None
 
     # Instruct 튜닝용 포맷은 "질문/입력/답변"을 명시적으로 분리합니다.
     # 입력이 없으면 질문과 답변만 사용해 불필요한 토큰을 줄입니다.
     if isinstance(input_text, str) and input_text.strip():
-        combined = f"질문: {instruction} 입력: {input_text} 답변: {answer}"
+        combined = f"질문: {prompt} 입력: {input_text} 답변: {answer}"
     else:
-        combined = f"질문: {instruction} 답변: {answer}"
+        combined = f"질문: {prompt} 답변: {answer}"
     line = sanitize_text(combined)
     return line if line else None
 
@@ -350,7 +376,9 @@ def main() -> None:
         args.batch_size = suggest_batch_size(device)
         print(f"자동 배치 크기 설정: {args.batch_size}")
 
-    needs_prepare = args.force_prepare or not train_path.exists() or train_path.stat().st_size == 0
+    needs_prepare = (
+        args.force_prepare or not train_path.exists() or train_path.stat().st_size == 0
+    )
     if needs_prepare:
         print("학습 파일이 없어 데이터셋을 다운로드합니다.")
         prepare_dataset(
@@ -363,7 +391,8 @@ def main() -> None:
     if resume:
         print(f"체크포인트에서 재개합니다: {output_dir}")
         tokenizer = cast(
-            PreTrainedTokenizerBase, AutoTokenizer.from_pretrained(output_dir.as_posix())
+            PreTrainedTokenizerBase,
+            AutoTokenizer.from_pretrained(output_dir.as_posix()),
         )
         model = cast(
             PreTrainedModel, AutoModelForCausalLM.from_pretrained(output_dir.as_posix())
@@ -384,7 +413,9 @@ def main() -> None:
 
     lines = read_lines(train_path)
     dataset = TextLineDataset(lines, tokenizer, args.max_length)
-    dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True, drop_last=True)
+    dataloader = DataLoader(
+        dataset, batch_size=args.batch_size, shuffle=True, drop_last=True
+    )
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
     start_epoch = 0
@@ -409,7 +440,9 @@ def main() -> None:
             attention_mask = cast(torch.Tensor, batch["attention_mask"]).to(device)
             labels = cast(torch.Tensor, batch["labels"]).to(device)
 
-            outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
+            outputs = model(
+                input_ids=input_ids, attention_mask=attention_mask, labels=labels
+            )
             loss = cast(torch.Tensor, outputs.loss)
             loss.backward()
 
@@ -417,13 +450,12 @@ def main() -> None:
             optimizer.zero_grad()
 
             if global_step % args.log_every == 0:
-                message = (
-                    f"에폭 {epoch + 1}/{args.epochs} | 스텝 {step} | "
-                    f"손실 {loss.item():.4f}"
-                )
-                print(message)
                 set_progress_postfix(progress, loss.item())
-            if args.save_every > 0 and global_step % args.save_every == 0 and global_step > 0:
+            if (
+                args.save_every > 0
+                and global_step % args.save_every == 0
+                and global_step > 0
+            ):
                 save_checkpoint(model, tokenizer, output_dir)
                 save_trainer_state(output_dir, epoch, global_step, optimizer)
 
