@@ -70,6 +70,31 @@ def test_build_training_lines_question_answer() -> None:
     assert "답변:" in lines[0]
 
 
+def test_extract_candidate_tokens_limit() -> None:
+    lines = ["안녕 반가워", "안녕 다시"]
+    tokens = finetune.extract_candidate_tokens(lines, 2)
+    assert tokens == ["안녕", "반가워"]
+
+
+def test_resolve_swap_range_invalid() -> None:
+    with pytest.raises(ValueError):
+        finetune.resolve_swap_range(10, 0.7, 0.5)
+
+
+def test_build_swapped_vocab_skips_special_tokens() -> None:
+    id_to_token = ["<pad>", "토큰A", "토큰B", "토큰C"]
+    candidate_tokens = ["새토큰1", "새토큰2"]
+    new_tokens, swap_ids = finetune.build_swapped_vocab(
+        id_to_token=id_to_token,
+        candidate_tokens=candidate_tokens,
+        start=0,
+        end=3,
+        special_tokens={"<pad>"},
+    )
+    assert new_tokens[0] == "<pad>"
+    assert swap_ids
+
+
 def test_read_lines(tmp_path) -> None:
     path = tmp_path / "train.txt"
     path.write_text("\n안녕\n\n반갑\n", encoding="utf-8")

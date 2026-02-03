@@ -135,6 +135,29 @@ def parse_args() -> argparse.Namespace:
         choices=["ask", "always", "never"],
         help="중단 이후 재개 여부(ask|always|never)",
     )
+    parser.add_argument(
+        "--tokenizer-swap",
+        action="store_true",
+        help="데이터셋 토큰으로 토크나이저 일부를 교체",
+    )
+    parser.add_argument(
+        "--tokenizer-swap-min-pct",
+        type=float,
+        default=0.5,
+        help="교체 시작 비율(예: 0.5)",
+    )
+    parser.add_argument(
+        "--tokenizer-swap-max-pct",
+        type=float,
+        default=0.7,
+        help="교체 종료 비율(예: 0.7)",
+    )
+    parser.add_argument(
+        "--tokenizer-swap-max-tokens",
+        type=int,
+        default=2000,
+        help="교체에 사용할 최대 토큰 수",
+    )
     return parser.parse_args()
 
 
@@ -156,6 +179,169 @@ def sanitize_text(text: str) -> str:
     return " ".join(text.replace("\n", " ").split()).strip()
 
 
+def extract_candidate_tokens(
+    lines: list[str],
+    max_tokens: int,
+) -> list[str]:
+    # 데이터셋 텍스트에서 후보 토큰을 추출합니다.
+    # 공백 기반으로 분리하되 불필요한 기호를 제거해 간단한 후보 집합을 만듭니다.
+    tokens: list[str] = []
+    seen: set[str] = set()
+    for line in lines:
+        for raw_token in line.replace("\n", " ").split():
+            token = raw_token.strip()
+            if not token:
+                continue
+            if token in seen:
+                continue
+            seen.add(token)
+            tokens.append(token)
+            if 0 < max_tokens <= len(tokens):
+                return tokens
+    return tokens
+
+
+def resolve_swap_range(
+    vocab_size: int,
+    min_pct: float,
+    max_pct: float,
+) -> tuple[int, int]:
+    # 토크나이저의 교체 구간을 비율로 계산합니다.
+    # 잘못된 비율 값은 명시적으로 실패시켜 오류를 드러냅니다.
+    if vocab_size <= 0:
+        raise ValueError("vocab_size는 1 이상이어야 합니다.")
+    if not (0.0 <= min_pct < max_pct <= 1.0):
+        raise ValueError("교체 비율은 0.0 <= min < max <= 1.0 이어야 합니다.")
+    start = int(vocab_size * min_pct)
+    end = int(vocab_size * max_pct)
+    if start >= end:
+        raise ValueError("교체 구간이 비어 있습니다.")
+    return start, end
+
+
+def build_swapped_vocab(
+    id_to_token: list[str],
+    candidate_tokens: list[str],
+    start: int,
+    end: int,
+    special_tokens: set[str],
+) -> tuple[list[str], list[int]]:
+    # 지정된 구간을 후보 토큰으로 교체한 새로운 vocab 리스트를 만듭니다.
+    # 특수 토큰은 교체하지 않도록 보호합니다.
+    if start < 0 or end > len(id_to_token):
+        raise ValueError("교체 범위가 vocab 크기를 벗어났습니다.")
+    if start >= end:
+        raise ValueError("교체 범위가 비어 있습니다.")
+    new_tokens = list(id_to_token)
+    swapped_ids: list[int] = []
+    candidate_index = 0
+    for vocab_id in range(start, end):
+        current_token = id_to_token[vocab_id]
+        if current_token in special_tokens:
+            continue
+        while candidate_index < len(candidate_tokens):
+            candidate = candidate_tokens[candidate_index]
+            candidate_index += 1
+            if candidate in special_tokens:
+                continue
+            if candidate in new_tokens:
+                continue
+            new_tokens[vocab_id] = candidate
+            swapped_ids.append(vocab_id)
+            break
+        if candidate_index >= len(candidate_tokens):
+            break
+    if not swapped_ids:
+        raise ValueError("교체할 토큰이 충분하지 않습니다.")
+    return new_tokens, swapped_ids
+
+
+def apply_swapped_vocab(
+    tokenizer: PreTrainedTokenizerBase,
+    new_id_to_token: list[str],
+) -> None:
+    # Fast 토크나이저의 vocab을 직접 교체합니다.
+    # 내부 모델 접근이 불가능하면 명확한 오류를 발생시킵니다.
+    if not hasattr(tokenizer, "backend_tokenizer"):
+        raise ValueError("Fast 토크나이저가 아니어서 vocab 교체를 지원하지 않습니다.")
+    backend_tokenizer = tokenizer.backend_tokenizer
+    model = getattr(backend_tokenizer, "model", None)
+    if model is None or not hasattr(model, "get_vocab"):
+        raise ValueError("토크나이저 모델에서 vocab 정보를 가져올 수 없습니다.")
+    vocab = model.get_vocab()
+    if not isinstance(vocab, dict):
+        raise ValueError("vocab 정보가 dict 형태가 아닙니다.")
+    merges = None
+    if hasattr(model, "get_merges"):
+        merges = model.get_merges()
+    if merges is None:
+        raise ValueError("BPE merges 정보를 가져올 수 없습니다.")
+    if len(new_id_to_token) != len(vocab):
+        raise ValueError("vocab 크기가 일치하지 않아 교체를 중단합니다.")
+    # 기존 id 체계를 유지하면서 token 문자열만 교체합니다.
+    new_vocab = {token: idx for idx, token in enumerate(new_id_to_token)}
+    try:
+        from tokenizers.models import BPE
+    except ModuleNotFoundError as exc:
+        raise ModuleNotFoundError("tokenizers 패키지가 필요합니다.") from exc
+    new_model = BPE(new_vocab, merges)
+    backend_tokenizer.model = new_model
+
+
+def reinitialize_embeddings(
+    model: PreTrainedModel,
+    swap_ids: list[int],
+) -> None:
+    # 교체된 토큰의 임베딩을 무작위 초기화로 리셋합니다.
+    # 기존 분포를 참고해 std를 계산해 안정적인 초기화를 유지합니다.
+    if not swap_ids:
+        return
+    embeddings = model.get_input_embeddings()
+    if embeddings is None:
+        raise ValueError("입력 임베딩을 찾을 수 없습니다.")
+    weight = embeddings.weight.data
+    std = float(weight.std().item())
+    if std == 0.0:
+        std = 0.02
+    for idx in swap_ids:
+        if 0 <= idx < weight.size(0):
+            weight[idx].normal_(mean=0.0, std=std)
+
+
+def swap_tokenizer_with_dataset(
+    tokenizer: PreTrainedTokenizerBase,
+    model: PreTrainedModel,
+    lines: list[str],
+    min_pct: float,
+    max_pct: float,
+    max_tokens: int,
+) -> list[int]:
+    # 데이터셋 기반으로 토크나이저 vocab을 일부 교체합니다.
+    # 교체 이후 임베딩을 재초기화하여 학습으로 재적응할 수 있게 합니다.
+    candidate_tokens = extract_candidate_tokens(lines, max_tokens)
+    if not candidate_tokens:
+        raise ValueError("교체에 사용할 토큰을 추출하지 못했습니다.")
+    vocab = tokenizer.get_vocab()
+    if not isinstance(vocab, dict):
+        raise ValueError("tokenizer.get_vocab 결과가 dict가 아닙니다.")
+    vocab_size = len(vocab)
+    start, end = resolve_swap_range(vocab_size, min_pct, max_pct)
+    id_to_token = [""] * vocab_size
+    for token, idx in vocab.items():
+        if 0 <= idx < vocab_size:
+            id_to_token[idx] = token
+    special_tokens = set(tokenizer.all_special_tokens)
+    new_id_to_token, swap_ids = build_swapped_vocab(
+        id_to_token=id_to_token,
+        candidate_tokens=candidate_tokens,
+        start=start,
+        end=end,
+        special_tokens=special_tokens,
+    )
+    apply_swapped_vocab(tokenizer, new_id_to_token)
+    model.resize_token_embeddings(len(tokenizer))
+    reinitialize_embeddings(model, swap_ids)
+    return swap_ids
 def resolve_total_ram_gb() -> float:
     if hasattr(os, "sysconf"):
         try:
@@ -383,6 +569,9 @@ def main() -> None:
             max_samples=args.dataset_max_samples,
         )
 
+    # 학습 데이터 라인을 먼저 읽어 토크나이저 교체에도 활용합니다.
+    lines = read_lines(train_path)
+
     if resume:
         print(f"체크포인트에서 재개합니다: {output_dir}")
         tokenizer = cast(
@@ -399,6 +588,17 @@ def main() -> None:
         model = cast(
             PreTrainedModel, AutoModelForCausalLM.from_pretrained(args.checkpoint)
         )
+    if args.tokenizer_swap:
+        print("토크나이저 교체를 시작합니다.")
+        swap_ids = swap_tokenizer_with_dataset(
+            tokenizer=tokenizer,
+            model=model,
+            lines=lines,
+            min_pct=args.tokenizer_swap_min_pct,
+            max_pct=args.tokenizer_swap_max_pct,
+            max_tokens=args.tokenizer_swap_max_tokens,
+        )
+        print(f"토크나이저 교체 완료: {len(swap_ids)}개 토큰")
     if tokenizer.pad_token_id is None:
         if tokenizer.eos_token is None:
             raise ValueError("pad_token_id 설정을 위해 eos_token이 필요합니다.")
@@ -406,7 +606,6 @@ def main() -> None:
 
     torch.nn.Module.to(model, device)
 
-    lines = read_lines(train_path)
     dataset = TextLineDataset(lines, tokenizer, args.max_length)
     dataloader = DataLoader(
         dataset, batch_size=args.batch_size, shuffle=True, drop_last=True
