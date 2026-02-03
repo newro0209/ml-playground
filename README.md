@@ -14,6 +14,16 @@
 
 기본 체크포인트는 `HuggingFaceTB/SmolLM2-135M`입니다.
 
+## SmolLM2 한국어 미세조정
+학습용 텍스트 파일이 없으면 자동으로 일상 대화 데이터셋을 다운로드해 학습 파일을 생성합니다. (한 줄 = 한 샘플)
+
+```bash
+./scripts/run_smollm2_finetune.sh
+```
+
+기본 학습 파일은 `data/processed/korean_train.txt`이며, 학습 결과는 `checkpoints/smollm2-ko`에 저장됩니다.
+기본 데이터셋은 Hugging Face의 `ohilikeit/empathetic_dialogues_mutli_turn_ko`이며, 필요하면 인자로 변경할 수 있습니다.
+
 ## Q&A
 Q. `ModuleNotFoundError: No module named 'ml_playground'`가 발생해요.  
 A. `src` 패키지 구조라서 편집 가능 설치 또는 `PYTHONPATH` 설정이 필요합니다.  
