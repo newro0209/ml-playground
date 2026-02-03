@@ -58,7 +58,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--checkpoint",
         type=str,
-        default="HuggingFaceTB/SmolLM2-135M",
+        default="HuggingFaceTB/SmolLM2-135M-Instruct",
         help="기본 체크포인트",
     )
     parser.add_argument(
@@ -172,7 +172,13 @@ def resolve_total_vram_gb() -> float:
 
 def suggest_batch_size(device: torch.device) -> int:
     if device.type == "cuda":
+        # CUDA 사용 시 VRAM을 기준으로 배치 크기를 단계적으로 올립니다.
+        # 고용량 VRAM에서는 학습 안정성과 처리량을 동시에 확보하기 위해 상향값을 허용합니다.
         vram_gb = resolve_total_vram_gb()
+        # 32GB 이상은 대형 배치로도 메모리 여유가 충분하다는 가정을 둡니다.
+        # 다만 너무 공격적인 값은 OOM 위험을 높이므로 보수적으로 설정합니다.
+        if vram_gb >= 32:
+            return 32
         if vram_gb >= 24:
             return 16
         if vram_gb >= 16:
@@ -180,7 +186,13 @@ def suggest_batch_size(device: torch.device) -> int:
         if vram_gb >= 8:
             return 4
         return 2
+    # CPU 경로는 시스템 RAM 기준으로 배치 크기를 결정합니다.
+    # RAM이 많을수록 데이터 로딩과 텐서 버퍼링 여유가 커진다는 전제입니다.
     ram_gb = resolve_total_ram_gb()
+    # 64GB 이상에서는 더 큰 배치를 시도해도 메모리 압박이 낮다고 판단합니다.
+    # 학습 안정성을 고려해 32보다 작은 값으로 상한을 둡니다.
+    if ram_gb >= 64:
+        return 32
     if ram_gb >= 32:
         return 16
     if ram_gb >= 16:

@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from typing import cast
 
+import pytest
+import torch
+
 from ml_playground import smollm2_finetune as finetune
 
 
@@ -70,3 +73,26 @@ def test_ask_resume_no() -> None:
         return "n"
 
     assert finetune.ask_resume(fake_input) is False
+
+
+def test_suggest_batch_size_cuda_vram_32(monkeypatch) -> None:
+    monkeypatch.setattr(finetune, "resolve_total_vram_gb", lambda: 32.0)
+    device = torch.device("cuda")
+    assert finetune.suggest_batch_size(device) == 32
+
+
+def test_suggest_batch_size_cuda_vram_boundary(monkeypatch) -> None:
+    monkeypatch.setattr(finetune, "resolve_total_vram_gb", lambda: 24.0)
+    device = torch.device("cuda")
+    assert finetune.suggest_batch_size(device) == 16
+
+
+def test_suggest_batch_size_cpu_ram_64(monkeypatch) -> None:
+    monkeypatch.setattr(finetune, "resolve_total_ram_gb", lambda: 64.0)
+    device = torch.device("cpu")
+    assert finetune.suggest_batch_size(device) == 32
+
+
+def test_build_training_lines_raises_on_empty() -> None:
+    with pytest.raises(ValueError):
+        finetune.build_training_lines([], 0)
