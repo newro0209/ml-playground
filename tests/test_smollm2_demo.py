@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import cast
 
 import torch
@@ -64,6 +65,8 @@ def test_main_runs(monkeypatch, capsys) -> None:
     class FakeArgs:
         def __init__(self) -> None:
             self.prompt = "테스트"
+            self.prompts_file = ""
+            self.checkpoint = "dummy"
             self.max_new_tokens = 4
             self.device = "cpu"
 
@@ -83,3 +86,22 @@ def test_main_runs(monkeypatch, capsys) -> None:
     demo.main()
     captured = cast(str, capsys.readouterr().out)
     assert "테스트 출력" in captured
+
+
+def test_read_prompts(tmp_path: Path) -> None:
+    path = tmp_path / "prompts.txt"
+    path.write_text("안녕\n\n반가워\n", encoding="utf-8")
+    prompts = demo.read_prompts(path)
+    assert prompts == ["안녕", "반가워"]
+
+
+def test_resolve_prompts_from_file(tmp_path: Path) -> None:
+    path = tmp_path / "prompts.txt"
+    path.write_text("첫 번째\n두 번째\n", encoding="utf-8")
+    prompts = demo.resolve_prompts("무시", path.as_posix())
+    assert prompts == ["첫 번째", "두 번째"]
+
+
+def test_resolve_prompts_single() -> None:
+    prompts = demo.resolve_prompts("단일", "")
+    assert prompts == ["단일"]
