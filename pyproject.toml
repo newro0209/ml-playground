@@ -9,6 +9,7 @@ dependencies = [
   "transformers",
   "safetensors",
   "datasets",
+  "tqdm",
 ]
 
 [project.optional-dependencies]

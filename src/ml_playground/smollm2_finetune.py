@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 from typing import cast
 
@@ -65,7 +66,12 @@ def parse_args() -> argparse.Namespace:
         help="모델 저장 경로",
     )
     parser.add_argument("--epochs", type=int, default=1, help="학습 에폭 수")
-    parser.add_argument("--batch-size", type=int, default=2, help="배치 크기")
+    parser.add_argument("--batch-size", type=int, default=0, help="배치 크기(0이면 자동)")
+    parser.add_argument(
+        "--auto-batch-size",
+        action="store_true",
+        help="RAM/VRAM을 기준으로 배치 크기를 자동으로 계산",
+    )
     parser.add_argument("--lr", type=float, default=5e-5, help="학습률")
     parser.add_argument("--max-length", type=int, default=256, help="최대 시퀀스 길이")
     parser.add_argument(
@@ -136,6 +142,45 @@ def sanitize_text(text: str) -> str:
     return " ".join(text.replace("\n", " ").split()).strip()
 
 
+def resolve_total_ram_gb() -> float:
+    if hasattr(os, "sysconf"):
+        try:
+            pages = os.sysconf("SC_PHYS_PAGES")
+            page_size = os.sysconf("SC_PAGE_SIZE")
+            if isinstance(pages, int) and isinstance(page_size, int):
+                return float(pages * page_size) / (1024**3)
+        except (ValueError, OSError):
+            return 0.0
+    return 0.0
+
+
+def resolve_total_vram_gb() -> float:
+    if not torch.cuda.is_available():
+        return 0.0
+    props = torch.cuda.get_device_properties(0)
+    return float(props.total_memory) / (1024**3)
+
+
+def suggest_batch_size(device: torch.device) -> int:
+    if device.type == "cuda":
+        vram_gb = resolve_total_vram_gb()
+        if vram_gb >= 24:
+            return 16
+        if vram_gb >= 16:
+            return 8
+        if vram_gb >= 8:
+            return 4
+        return 2
+    ram_gb = resolve_total_ram_gb()
+    if ram_gb >= 32:
+        return 16
+    if ram_gb >= 16:
+        return 8
+    if ram_gb >= 8:
+        return 4
+    return 2
+
+
 def build_training_lines(
     dataset_rows: list[dict[str, object]],
     max_samples: int,
@@ -203,6 +248,10 @@ def main() -> None:
 
     torch.manual_seed(42)
 
+    if args.auto_batch_size or args.batch_size <= 0:
+        args.batch_size = suggest_batch_size(device)
+        print(f"자동 배치 크기 설정: {args.batch_size}")
+
     needs_prepare = args.force_prepare or not train_path.exists() or train_path.stat().st_size == 0
     if needs_prepare:
         print("학습 파일이 없어 데이터셋을 다운로드합니다.")
@@ -231,7 +280,8 @@ def main() -> None:
     global_step = 0
     model.train()
     for epoch in range(args.epochs):
-        for step, batch in enumerate(dataloader):
+        progress = build_progress_bar(dataloader, f"에폭 {epoch + 1}/{args.epochs}")
+        for step, batch in enumerate(progress):
             input_ids = cast(torch.Tensor, batch["input_ids"]).to(device)
             attention_mask = cast(torch.Tensor, batch["attention_mask"]).to(device)
             labels = cast(torch.Tensor, batch["labels"]).to(device)
@@ -244,10 +294,12 @@ def main() -> None:
             optimizer.zero_grad()
 
             if global_step % args.log_every == 0:
-                print(
+                message = (
                     f"에폭 {epoch + 1}/{args.epochs} | 스텝 {step} | "
                     f"손실 {loss.item():.4f}"
                 )
+                print(message)
+                set_progress_postfix(progress, loss.item())
             if args.save_every > 0 and global_step % args.save_every == 0 and global_step > 0:
                 save_checkpoint(model, tokenizer, output_dir)
 
@@ -256,6 +308,19 @@ def main() -> None:
         save_checkpoint(model, tokenizer, output_dir)
 
     print(f"학습 완료. 저장 위치: {output_dir}")
+
+
+def build_progress_bar(dataloader: DataLoader, desc: str):
+    try:
+        from tqdm.auto import tqdm
+    except ModuleNotFoundError:
+        return dataloader
+    return tqdm(dataloader, desc=desc)
+
+
+def set_progress_postfix(progress, loss_value: float) -> None:
+    if hasattr(progress, "set_postfix"):
+        progress.set_postfix({"loss": f"{loss_value:.4f}"})
 
 
 if __name__ == "__main__":
