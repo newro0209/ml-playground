@@ -9,7 +9,7 @@ from typing import cast
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedModel, PreTrainedTokenizerBase
 
-from ml_playground.smollm2_common import resolve_device
+from ml_playground.smollm2.common import resolve_device
 
 
 def parse_args() -> argparse.Namespace:

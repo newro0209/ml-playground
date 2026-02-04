@@ -9,9 +9,9 @@ from pathlib import Path
 
 import torch
 
-from ml_playground import smollm2_demo
-from ml_playground import smollm2_eval
-from ml_playground import smollm2_finetune
+from ml_playground.smollm2 import demo as smollm2_demo
+from ml_playground.smollm2 import eval as smollm2_eval
+from ml_playground.smollm2 import finetune as smollm2_finetune
 from ml_playground import smollm2_gguf
 
 
@@ -69,13 +69,14 @@ def test_run_smollm2_finetune_script(monkeypatch, tmp_path: Path) -> None:
     # 2) 학습 루프가 가볍게 끝나도록 핵심 의존성을 더미로 교체합니다.
     # 3) 동일 인자로 main을 호출해 예외 없이 종료되는지 확인합니다.
     args = extract_script_args(
-        Path("scripts/run_smollm2_finetune.sh"), "ml_playground.smollm2_finetune"
+        Path("scripts/run_smollm2_finetune.sh"), "ml_playground.smollm2.finetune"
     )
 
     class DummyTokenizer:
         def __init__(self) -> None:
             self.pad_token_id = 0
             self.eos_token = ""
+            self.all_special_tokens = ["<pad>", "<eos>"]
 
         def __call__(
             self,
@@ -98,6 +99,9 @@ def test_run_smollm2_finetune_script(monkeypatch, tmp_path: Path) -> None:
         def save_pretrained(self, _: str) -> None:
             return None
 
+        def __len__(self) -> int:
+            return 4
+
     class DummyOutput:
         def __init__(self, loss: torch.Tensor) -> None:
             self.loss = loss
@@ -106,6 +110,7 @@ def test_run_smollm2_finetune_script(monkeypatch, tmp_path: Path) -> None:
         def __init__(self) -> None:
             super().__init__()
             self.dummy = torch.nn.Parameter(torch.zeros(1))
+            self.embed = torch.nn.Embedding(4, 8)
 
         def forward(
             self,
@@ -119,6 +124,21 @@ def test_run_smollm2_finetune_script(monkeypatch, tmp_path: Path) -> None:
             return DummyOutput(self.dummy.sum())
 
         def save_pretrained(self, _: str) -> None:
+            return None
+
+        def get_input_embeddings(self):
+            return self.embed
+
+        def get_output_embeddings(self):
+            return None
+
+        def resize_token_embeddings(
+            self,
+            new_size: int,
+            mean_resizing: bool = False,
+        ):
+            _ = new_size
+            _ = mean_resizing
             return None
 
     monkeypatch.setattr(
@@ -135,23 +155,21 @@ def test_run_smollm2_finetune_script(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(smollm2_finetune, "load_hf_dataset", lambda *_: [])
     monkeypatch.setattr(smollm2_finetune, "save_checkpoint", lambda *_: None)
     monkeypatch.setattr(smollm2_finetune, "save_trainer_state", lambda *_: None)
-    def fake_swap(
+    def fake_rebuild(
         tokenizer: object,
-        model: object,
         lines: list[str],
-        max_tokens: int,
-    ) -> list[int]:
+        vocab_size: int,
+    ) -> object:
         _ = tokenizer
-        _ = model
         _ = lines
-        _ = max_tokens
-        return []
+        _ = vocab_size
+        return DummyTokenizer()
 
-    monkeypatch.setattr(smollm2_finetune, "swap_tokenizer_with_dataset", fake_swap)
+    monkeypatch.setattr(smollm2_finetune, "rebuild_tokenizer_from_lines", fake_rebuild)
     monkeypatch.setattr(smollm2_finetune, "resolve_device", lambda _: torch.device("cpu"))
     monkeypatch.setattr(smollm2_finetune, "has_resume_checkpoint", lambda _: False)
 
-    checkpoint_dir = Path("checkpoints/smollm2-ko-instruct")
+    checkpoint_dir = Path("checkpoints/smollm2/ko-instruct")
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     train_file = Path("data/processed/ko_instruct_train.txt")
     train_file.parent.mkdir(parents=True, exist_ok=True)
@@ -172,7 +190,7 @@ def test_run_smollm2_demo_script(monkeypatch) -> None:
     monkeypatch.setenv("PROMPTS_FILE", "data/prompts/ko_instruct_eval.txt")
     args = extract_script_args(
         Path("scripts/run_smollm2_demo.sh"),
-        "ml_playground.smollm2_demo",
+        "ml_playground.smollm2.demo",
         occurrence=0,
     )
 
@@ -225,15 +243,137 @@ def test_run_smollm2_demo_script(monkeypatch) -> None:
     smollm2_demo.main()
 
 
+def test_run_smollm2_finetune_resume_skips_rebuild(monkeypatch, tmp_path: Path) -> None:
+    # 1) 재개 모드로 설정하고 더미 구성 요소를 주입합니다.
+    # 2) 토크나이저 재구성 함수가 호출되지 않도록 보장합니다.
+    # 3) main이 예외 없이 종료되는지 확인합니다.
+    args = extract_script_args(
+        Path("scripts/run_smollm2_finetune.sh"), "ml_playground.smollm2.finetune"
+    )
+
+    class DummyTokenizer:
+        def __init__(self) -> None:
+            self.pad_token_id = 0
+            self.eos_token = ""
+            self.all_special_tokens = ["<pad>", "<eos>"]
+
+        def __call__(
+            self,
+            text: str,
+            return_tensors: str,
+            truncation: bool,
+            max_length: int,
+            padding: str,
+        ) -> dict[str, torch.Tensor]:
+            _ = text
+            _ = return_tensors
+            _ = truncation
+            _ = max_length
+            _ = padding
+            return {
+                "input_ids": torch.tensor([[1, 2, 3]]),
+                "attention_mask": torch.tensor([[1, 1, 1]]),
+            }
+
+        def save_pretrained(self, _: str) -> None:
+            return None
+
+        def __len__(self) -> int:
+            return 4
+
+    class DummyOutput:
+        def __init__(self, loss: torch.Tensor) -> None:
+            self.loss = loss
+
+    class DummyModel(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.dummy = torch.nn.Parameter(torch.zeros(1))
+            self.embed = torch.nn.Embedding(4, 8)
+
+        def forward(
+            self,
+            input_ids: torch.Tensor,
+            attention_mask: torch.Tensor,
+            labels: torch.Tensor,
+        ) -> DummyOutput:
+            _ = input_ids
+            _ = attention_mask
+            _ = labels
+            return DummyOutput(self.dummy.sum())
+
+        def save_pretrained(self, _: str) -> None:
+            return None
+
+        def get_input_embeddings(self):
+            return self.embed
+
+        def get_output_embeddings(self):
+            return None
+
+        def resize_token_embeddings(
+            self,
+            new_size: int,
+            mean_resizing: bool = False,
+        ):
+            _ = new_size
+            _ = mean_resizing
+            return None
+
+    monkeypatch.setattr(
+        smollm2_finetune.AutoTokenizer,
+        "from_pretrained",
+        lambda _: DummyTokenizer(),
+    )
+    monkeypatch.setattr(
+        smollm2_finetune.AutoModelForCausalLM,
+        "from_pretrained",
+        lambda _: DummyModel(),
+    )
+    monkeypatch.setattr(smollm2_finetune, "read_lines", lambda _: ["테스트 문장"])
+    monkeypatch.setattr(smollm2_finetune, "load_hf_dataset", lambda *_: [])
+    monkeypatch.setattr(smollm2_finetune, "save_checkpoint", lambda *_: None)
+    monkeypatch.setattr(smollm2_finetune, "save_trainer_state", lambda *_: None)
+    monkeypatch.setattr(smollm2_finetune, "load_trainer_state", lambda _: {})
+    monkeypatch.setattr(smollm2_finetune, "resolve_device", lambda _: torch.device("cpu"))
+    monkeypatch.setattr(smollm2_finetune, "has_resume_checkpoint", lambda _: True)
+
+    def fake_rebuild(
+        tokenizer: object,
+        lines: list[str],
+        vocab_size: int,
+    ) -> object:
+        _ = tokenizer
+        _ = lines
+        _ = vocab_size
+        raise AssertionError("재개 학습에서는 토크나이저 재구성이 호출되면 안 됩니다.")
+
+    monkeypatch.setattr(smollm2_finetune, "rebuild_tokenizer_from_lines", fake_rebuild)
+
+    checkpoint_dir = Path("checkpoints/smollm2/ko-instruct")
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    train_file = Path("data/processed/ko_instruct_train.txt")
+    train_file.parent.mkdir(parents=True, exist_ok=True)
+    train_file.write_text("테스트\n", encoding="utf-8")
+
+    monkeypatch.setenv("PYTHONPATH", "./src")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["smollm2_finetune.py", "--resume-mode", "always", *args],
+    )
+    smollm2_finetune.main()
+
+
 def test_run_smollm2_demo_script_finetuned(monkeypatch) -> None:
     # 1) 스크립트의 두 번째 실행 인자를 읽습니다.
     # 2) 모델/토크나이저를 더미로 교체합니다.
     # 3) 동일 인자로 main이 동작하는지 확인합니다.
-    monkeypatch.setenv("FINETUNED_CHECKPOINT", "checkpoints/smollm2-ko-instruct")
+    monkeypatch.setenv("FINETUNED_CHECKPOINT", "checkpoints/smollm2/ko-instruct")
     monkeypatch.setenv("PROMPTS_FILE", "data/prompts/ko_instruct_eval.txt")
     args = extract_script_args(
         Path("scripts/run_smollm2_demo.sh"),
-        "ml_playground.smollm2_demo",
+        "ml_playground.smollm2.demo",
         occurrence=1,
     )
 
@@ -291,7 +431,7 @@ def test_run_smollm2_eval_script(monkeypatch) -> None:
     # 2) 평가 계산을 더미 값으로 대체합니다.
     # 3) 동일 인자로 main이 동작하는지 확인합니다.
     args = extract_script_args(
-        Path("scripts/run_smollm2_eval.sh"), "ml_playground.smollm2_eval"
+        Path("scripts/run_smollm2_eval.sh"), "ml_playground.smollm2.eval"
     )
 
     class DummyTokenizer:
@@ -322,7 +462,7 @@ def test_run_smollm2_gguf_script(monkeypatch, tmp_path: Path) -> None:
     llama_dir = tmp_path / "llama.cpp"
     llama_dir.mkdir(parents=True, exist_ok=True)
     (llama_dir / "convert_hf_to_gguf.py").write_text("# dummy", encoding="utf-8")
-    checkpoint_dir = Path("checkpoints/smollm2-ko-instruct")
+    checkpoint_dir = Path("checkpoints/smollm2/ko-instruct")
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
     monkeypatch.setenv("LLAMA_CPP_DIR", llama_dir.as_posix())

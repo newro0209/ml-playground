@@ -49,7 +49,8 @@ SmolLM2는 본 프로젝트의 **참고 예제(reference implementation)** 입�
 #### 기본 동작
 
 * 학습 파일: `data/processed/ko_instruct_train.txt`
-* 체크포인트 저장: `checkpoints/smollm2-ko-instruct`
+* 체크포인트 저장: `checkpoints/smollm2/ko-instruct`
+* 최신 체크포인트 링크: `checkpoints/smollm2/latest`
 * 기본 데이터셋: `beomi/KoAlpaca-RealQA`
 * RAM/VRAM 크기에 맞춰 배치 크기 자동 설정
 * 기존 체크포인트 존재 시 재개 여부 질의 (`--resume-mode`로 제어 가능)
@@ -111,7 +112,7 @@ LLAMA_CPP_DIR=/path/to/llama.cpp ./scripts/run_smollm2_gguf.sh
 * `src` 패키지 구조이므로 다음 중 하나 필요
 
 ```bash
-PYTHONPATH=./src python -m ml_playground.smollm2_demo
+PYTHONPATH=./src python -m ml_playground.smollm2.demo
 ```
 
 또는

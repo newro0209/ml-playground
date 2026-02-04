@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import argparse
-import json
+import logging
 import os
 from pathlib import Path
 from typing import cast
@@ -17,7 +17,7 @@ from transformers import (
     PreTrainedTokenizerBase,
 )
 
-from ml_playground.smollm2_common import resolve_device
+from ml_playground.smollm2.common import resolve_device
 
 
 class TextLineDataset(Dataset):
@@ -74,8 +74,31 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output-dir",
         type=str,
-        default="checkpoints/smollm2-ko-instruct",
-        help="모델 저장 경로",
+        default="",
+        help="모델 저장 경로(지정 시 output-root/run-name보다 우선)",
+    )
+    parser.add_argument(
+        "--output-root",
+        type=str,
+        default="checkpoints/smollm2",
+        help="모델 저장 최상위 폴더",
+    )
+    parser.add_argument(
+        "--run-name",
+        type=str,
+        default="ko-instruct",
+        help="학습 실행 이름(모델 하위 폴더명)",
+    )
+    parser.add_argument(
+        "--latest-link",
+        action="store_true",
+        help="output-root 기준 최신 실행 심볼릭 링크를 생성",
+    )
+    parser.add_argument(
+        "--latest-name",
+        type=str,
+        default="latest",
+        help="최신 실행 심볼릭 링크 이름",
     )
     parser.add_argument("--epochs", type=int, default=1, help="학습 에폭 수")
     parser.add_argument(
@@ -92,13 +115,25 @@ def parse_args() -> argparse.Namespace:
         "--dataset",
         type=str,
         default="beomi/KoAlpaca-RealQA",
-        help="자동 다운로드에 사용할 데이터셋(접근 동의가 필요한 데이터셋 포함)",
+        help="자동 다운로드에 사용할 단일 데이터셋(레거시 옵션)",
     )
     parser.add_argument(
         "--dataset-split",
         type=str,
         default="train",
-        help="데이터셋 분할 이름",
+        help="단일 데이터셋 분할 이름(레거시 옵션)",
+    )
+    parser.add_argument(
+        "--datasets",
+        type=str,
+        default=(
+            "beomi/KoAlpaca-RealQA:train:ko,"
+            "Ammad1Ali/Korean-conversational-dataset:train:ko,"
+            "Ahren09/empathetic_dialogues:train:en"
+        ),
+        help=(
+            "학습에 사용할 데이터셋 목록(콤마 구분, name[:split[:lang]] 형식)"
+        ),
     )
     parser.add_argument(
         "--dataset-max-samples",
@@ -137,15 +172,15 @@ def parse_args() -> argparse.Namespace:
         help="중단 이후 재개 여부(ask|always|never)",
     )
     parser.add_argument(
-        "--tokenizer-swap",
+        "--tokenizer-rebuild",
         action="store_true",
-        help="데이터셋 토큰으로 토크나이저 일부를 교체",
+        help="데이터셋에서 새 토크나이저를 학습해 전체 vocab을 교체",
     )
     parser.add_argument(
-        "--tokenizer-swap-max-tokens",
+        "--tokenizer-vocab-size",
         type=int,
-        default=2000,
-        help="교체에 사용할 최대 토큰 수",
+        default=0,
+        help="새 토크나이저 vocab 크기(0이면 기존 vocab 크기 사용)",
     )
     return parser.parse_args()
 
@@ -168,199 +203,130 @@ def sanitize_text(text: str) -> str:
     return " ".join(text.replace("\n", " ").split()).strip()
 
 
-def extract_candidate_tokens(
-    lines: list[str],
-    max_tokens: int,
-) -> list[str]:
-    # 데이터셋 텍스트에서 후보 토큰을 추출합니다.
-    # 공백 기반으로 분리하되 불필요한 기호를 제거해 간단한 후보 집합을 만듭니다.
-    tokens: list[str] = []
-    seen: set[str] = set()
-    for line in lines:
-        for raw_token in line.replace("\n", " ").split():
-            token = raw_token.strip()
-            if not token:
-                continue
-            if not contains_korean(token):
-                continue
-            if token in seen:
-                continue
-            seen.add(token)
-            tokens.append(token)
-            if 0 < max_tokens <= len(tokens):
-                return tokens
-    return tokens
+def infer_dataset_lang(dataset_name: str) -> str:
+    # 1) 알려진 데이터셋은 사람이 판단한 언어 정보를 우선 사용합니다.
+    # 2) 매핑에 없으면 추론하지 않고 "unknown"으로 남겨 잘못된 분류를 피합니다.
+    known_map = {
+        "beomi/KoAlpaca-RealQA": "ko",
+        "Ammad1Ali/Korean-conversational-dataset": "ko",
+        "Ahren09/empathetic_dialogues": "en",
+    }
+    return known_map.get(dataset_name, "unknown")
 
 
-def contains_korean(token: str) -> bool:
-    # 한글 범위를 포함하는지 확인해 한국어 토큰을 추출합니다.
-    for char in token:
-        if "\uac00" <= char <= "\ud7a3":
-            return True
-    return False
+def parse_dataset_spec(spec: str) -> dict[str, str]:
+    # 1) 입력 문자열을 정리해 빈 값 여부를 확인합니다.
+    # 2) ":" 기준으로 분리해 name/split/lang 구성으로 해석합니다.
+    # 3) 누락된 split/lang은 기본값으로 채워 명시적 설정을 보장합니다.
+    cleaned = spec.strip()
+    if not cleaned:
+        raise ValueError("빈 데이터셋 스펙은 허용하지 않습니다.")
+    parts = [part.strip() for part in cleaned.split(":")]
+    if len(parts) > 3:
+        raise ValueError("데이터셋 스펙은 name[:split[:lang]] 형식이어야 합니다.")
+    dataset_name = parts[0]
+    split_name = parts[1] if len(parts) >= 2 and parts[1] else "train"
+    lang = parts[2] if len(parts) == 3 and parts[2] else infer_dataset_lang(dataset_name)
+    if not dataset_name:
+        raise ValueError("데이터셋 이름이 비어 있습니다.")
+    if not split_name:
+        raise ValueError("데이터셋 분할 이름이 비어 있습니다.")
+    return {"name": dataset_name, "split": split_name, "lang": lang}
 
 
-def is_english_token(token: str) -> bool:
-    # 영문 토큰 여부를 판별합니다.
-    # 토크나이저 접두어(Ġ, ▁ 등)는 제거한 뒤 검사합니다.
-    stripped = token.lstrip("Ġ▁")
-    if not stripped:
-        return False
-    return stripped.isascii() and stripped.isalpha()
-
-
-def build_swapped_vocab(
-    id_to_token: list[str],
-    candidate_tokens: list[str],
-    special_tokens: set[str],
-) -> tuple[list[str], list[int]]:
-    # 영어 토큰은 유지하고, 그 외 영역에 한국어 후보 토큰을 교체합니다.
-    # 특수 토큰은 교체하지 않도록 보호합니다.
-    new_tokens = list(id_to_token)
-    swapped_ids: list[int] = []
-    candidate_index = 0
-    for vocab_id, current_token in enumerate(id_to_token):
-        if current_token in special_tokens:
+def resolve_dataset_specs(
+    datasets_arg: str,
+    fallback_name: str,
+    fallback_split: str,
+) -> list[dict[str, str]]:
+    # 1) 새 옵션이 비어 있으면 레거시 단일 옵션으로 복구합니다.
+    # 2) 콤마로 분리한 각 스펙을 파싱해 일관된 리스트로 반환합니다.
+    if not datasets_arg.strip():
+        legacy_lang = infer_dataset_lang(fallback_name)
+        return [
+            {"name": fallback_name, "split": fallback_split, "lang": legacy_lang}
+        ]
+    specs: list[dict[str, str]] = []
+    for raw in datasets_arg.split(","):
+        if not raw.strip():
             continue
-        if is_english_token(current_token):
-            continue
-        while candidate_index < len(candidate_tokens):
-            candidate = candidate_tokens[candidate_index]
-            candidate_index += 1
-            if candidate in special_tokens:
-                continue
-            if candidate in new_tokens:
-                continue
-            new_tokens[vocab_id] = candidate
-            swapped_ids.append(vocab_id)
-            break
-        if candidate_index >= len(candidate_tokens):
-            break
-    if not swapped_ids:
-        raise ValueError("교체할 토큰이 충분하지 않습니다.")
-    return new_tokens, swapped_ids
+        specs.append(parse_dataset_spec(raw))
+    if not specs:
+        raise ValueError("유효한 데이터셋 스펙이 없습니다.")
+    return specs
 
 
-def normalize_merges(merges: object) -> list[tuple[str, str]]:
-    # merges를 (str, str) 튜플 리스트로 정규화합니다.
-    if not isinstance(merges, list):
-        raise ValueError("BPE merges 정보가 list 형태가 아닙니다.")
-    normalized: list[tuple[str, str]] = []
-    for item in merges:
-        if isinstance(item, tuple) and len(item) == 2:
-            left, right = item
-        elif isinstance(item, list) and len(item) == 2:
-            left, right = item
-        else:
-            raise ValueError("BPE merges 요소의 형태가 올바르지 않습니다.")
-        if not isinstance(left, str) or not isinstance(right, str):
-            raise ValueError("BPE merges 요소는 문자열이어야 합니다.")
-        normalized.append((left, right))
-    return normalized
+def format_tokens_for_log(tokens: list[str], max_items: int) -> str:
+    # 로그 출력이 과도하게 길어지지 않도록 토큰 목록을 압축합니다.
+    # 중간 생략이 필요한 경우 "..."를 넣어 앞/뒤 일부만 유지합니다.
+    if max_items < 3:
+        raise ValueError("max_items는 3 이상이어야 합니다.")
+    if len(tokens) <= max_items:
+        return ", ".join(tokens)
+    head_count = max_items // 2
+    tail_count = max_items - head_count - 1
+    head = tokens[:head_count]
+    tail = tokens[-tail_count:] if tail_count > 0 else []
+    compressed = head + ["..."] + tail
+    return ", ".join(compressed)
 
 
-def extract_backend_vocab_merges(backend_tokenizer) -> tuple[dict[str, int], list[tuple[str, str]]]:
-    # backend_tokenizer에서 vocab/merges를 우선적으로 추출합니다.
-    if hasattr(backend_tokenizer, "get_vocab"):
-        vocab = backend_tokenizer.get_vocab()
-        if not isinstance(vocab, dict):
-            raise ValueError("backend_tokenizer.get_vocab 결과가 dict가 아닙니다.")
-        merges = None
-        if hasattr(backend_tokenizer, "to_str"):
-            raw = backend_tokenizer.to_str()
-            parsed = json.loads(raw)
-            model = parsed.get("model", {})
-            merges = model.get("merges")
-        if merges is None:
-            raise ValueError("backend_tokenizer에서 merges 정보를 찾을 수 없습니다.")
-        return vocab, normalize_merges(merges)
-    if hasattr(backend_tokenizer, "to_str"):
-        raw = backend_tokenizer.to_str()
-        parsed = json.loads(raw)
-        model = parsed.get("model", {})
-        vocab = model.get("vocab")
-        merges = model.get("merges")
-        if not isinstance(vocab, dict):
-            raise ValueError("backend_tokenizer JSON에서 vocab을 찾지 못했습니다.")
-        if merges is None:
-            raise ValueError("backend_tokenizer JSON에서 merges를 찾지 못했습니다.")
-        return vocab, normalize_merges(merges)
-    raise ValueError("backend_tokenizer에서 vocab 정보를 가져올 수 없습니다.")
-
-
-def apply_swapped_vocab(
-    tokenizer: PreTrainedTokenizerBase,
-    new_id_to_token: list[str],
-) -> None:
-    # Fast 토크나이저의 vocab을 직접 교체합니다.
-    # 내부 모델 접근이 불가능하면 명확한 오류를 발생시킵니다.
-    if not hasattr(tokenizer, "backend_tokenizer"):
-        raise ValueError("Fast 토크나이저가 아니어서 vocab 교체를 지원하지 않습니다.")
-    backend_tokenizer = tokenizer.backend_tokenizer
-    vocab, merges = extract_backend_vocab_merges(backend_tokenizer)
-    if len(new_id_to_token) != len(vocab):
-        raise ValueError("vocab 크기가 일치하지 않아 교체를 중단합니다.")
-    # 기존 id 체계를 유지하면서 token 문자열만 교체합니다.
-    new_vocab = {token: idx for idx, token in enumerate(new_id_to_token)}
-    try:
-        from tokenizers.models import BPE
-    except ModuleNotFoundError as exc:
-        raise ModuleNotFoundError("tokenizers 패키지가 필요합니다.") from exc
-    new_model = BPE(new_vocab, merges)
-    backend_tokenizer.model = new_model
-
-
-def reinitialize_embeddings(
+def reinitialize_all_embeddings(
     model: PreTrainedModel,
-    swap_ids: list[int],
+    std: float,
 ) -> None:
-    # 교체된 토큰의 임베딩을 무작위 초기화로 리셋합니다.
-    # 기존 분포를 참고해 std를 계산해 안정적인 초기화를 유지합니다.
-    if not swap_ids:
-        return
+    # 전체 임베딩을 동일 분포로 재초기화해 새 토크나이저에 맞춥니다.
+    # 입력/출력 임베딩을 모두 초기화해 학습 안정성을 확보합니다.
     embeddings = model.get_input_embeddings()
     if embeddings is None:
         raise ValueError("입력 임베딩을 찾을 수 없습니다.")
-    weight = embeddings.weight.data
-    std = float(weight.std().item())
-    if std == 0.0:
-        std = 0.02
-    for idx in swap_ids:
-        if 0 <= idx < weight.size(0):
-            weight[idx].normal_(mean=0.0, std=std)
+    embeddings.weight.data.normal_(mean=0.0, std=std)
+    output_embeddings = model.get_output_embeddings()
+    if output_embeddings is not None:
+        output_embeddings.weight.data.normal_(mean=0.0, std=std)
 
 
-def swap_tokenizer_with_dataset(
+def resolve_embedding_std(model: PreTrainedModel) -> float:
+    # 임베딩 분포에서 표준편차를 계산해 초기화 스케일로 사용합니다.
+    embeddings = model.get_input_embeddings()
+    if embeddings is None:
+        raise ValueError("입력 임베딩을 찾을 수 없습니다.")
+    std = float(embeddings.weight.data.std().item())
+    return std if std > 0.0 else 0.02
+
+
+def rebuild_tokenizer_from_lines(
     tokenizer: PreTrainedTokenizerBase,
-    model: PreTrainedModel,
     lines: list[str],
-    max_tokens: int,
-) -> list[int]:
-    # 데이터셋 기반으로 토크나이저 vocab을 일부 교체합니다.
-    # 교체 이후 임베딩을 재초기화하여 학습으로 재적응할 수 있게 합니다.
-    candidate_tokens = extract_candidate_tokens(lines, max_tokens)
-    if not candidate_tokens:
-        raise ValueError("교체에 사용할 토큰을 추출하지 못했습니다.")
-    vocab = tokenizer.get_vocab()
+    vocab_size: int,
+) -> PreTrainedTokenizerBase:
+    # 1) 기존 토크나이저에서 특수 토큰을 수집합니다.
+    # 2) 동일한 토크나이저 타입으로 새 토크나이저를 학습합니다.
+    # 3) 결과 vocab 일부를 로깅해 구성 결과를 확인합니다.
+    if not hasattr(tokenizer, "train_new_from_iterator"):
+        raise ValueError("토크나이저 학습을 지원하지 않는 타입입니다.")
+    size = vocab_size if vocab_size > 0 else len(tokenizer)
+    special_tokens = list(tokenizer.all_special_tokens)
+    if special_tokens:
+        new_tokenizer = tokenizer.train_new_from_iterator(
+            lines, vocab_size=size, new_special_tokens=special_tokens
+        )
+    else:
+        new_tokenizer = tokenizer.train_new_from_iterator(lines, vocab_size=size)
+    vocab = new_tokenizer.get_vocab()
     if not isinstance(vocab, dict):
-        raise ValueError("tokenizer.get_vocab 결과가 dict가 아닙니다.")
-    vocab_size = len(vocab)
-    if vocab_size == 0:
-        raise ValueError("tokenizer vocab이 비어 있습니다.")
-    id_to_token = [""] * vocab_size
+        raise ValueError("재구성된 토크나이저 vocab이 dict가 아닙니다.")
+    id_to_token = [""] * len(vocab)
     for token, idx in vocab.items():
-        if 0 <= idx < vocab_size:
+        if 0 <= idx < len(vocab):
             id_to_token[idx] = token
-    special_tokens = set(tokenizer.all_special_tokens)
-    new_id_to_token, swap_ids = build_swapped_vocab(
-        id_to_token=id_to_token,
-        candidate_tokens=candidate_tokens,
-        special_tokens=special_tokens,
+    preview = format_tokens_for_log(
+        [token for token in id_to_token if token], 20
     )
-    apply_swapped_vocab(tokenizer, new_id_to_token)
-    model.resize_token_embeddings(len(tokenizer))
-    reinitialize_embeddings(model, swap_ids)
-    return swap_ids
+    logging.getLogger(__name__).info(
+        "재구성된 토크나이저 vocab 미리보기: %s", preview
+    )
+    return new_tokenizer
 
 
 def resolve_total_ram_gb() -> float:
@@ -428,7 +394,12 @@ def build_training_lines(
         if instruct_line:
             lines.append(instruct_line)
             continue
-        # 2) 단일 텍스트 필드를 가진 데이터셋은 그대로 사용합니다.
+        # 2) 대화 리스트 형태를 지원합니다.
+        dialogue_line = build_dialogue_line(row)
+        if dialogue_line:
+            lines.append(dialogue_line)
+            continue
+        # 3) 단일 텍스트 필드를 가진 데이터셋은 그대로 사용합니다.
         text_line = build_text_line(row)
         if text_line:
             lines.append(text_line)
@@ -446,13 +417,25 @@ def build_instruct_line(row: dict[str, object]) -> str | None:
     output = row.get("output")
     response = row.get("response")
     answer_text = row.get("answer")
+    short_question = row.get("short_question")
+    short_answer = row.get("short_answer")
+    prompt_text = row.get("prompt")
+    utterance_text = row.get("utterance")
     input_text = row.get("input")
 
     # 질문 필드가 없으면 Instruct 스키마로 처리하지 않습니다.
     prompt = (
         instruction
         if isinstance(instruction, str)
-        else question if isinstance(question, str) else None
+        else (
+            question
+            if isinstance(question, str)
+            else (
+                short_question
+                if isinstance(short_question, str)
+                else prompt_text if isinstance(prompt_text, str) else None
+            )
+        )
     )
     if not isinstance(prompt, str):
         return None
@@ -463,7 +446,15 @@ def build_instruct_line(row: dict[str, object]) -> str | None:
         else (
             response
             if isinstance(response, str)
-            else answer_text if isinstance(answer_text, str) else None
+            else (
+                answer_text
+                if isinstance(answer_text, str)
+                else (
+                    short_answer
+                    if isinstance(short_answer, str)
+                    else utterance_text if isinstance(utterance_text, str) else None
+                )
+            )
         )
     )
     if not isinstance(answer, str):
@@ -489,20 +480,57 @@ def build_text_line(row: dict[str, object]) -> str | None:
     return None
 
 
-def prepare_dataset(
-    train_path: Path,
-    dataset_name: str,
-    split_name: str,
-    max_samples: int,
-) -> None:
-    print(f"데이터셋 로딩: {dataset_name} ({split_name})")
-    dataset = load_hf_dataset(dataset_name, split_name)
-    raw_rows = cast(list[dict[str, object]], list(dataset))
-    lines = build_training_lines(raw_rows, max_samples)
-    train_path.parent.mkdir(parents=True, exist_ok=True)
-    with train_path.open("w", encoding="utf-8") as f:
+def build_dialogue_line(row: dict[str, object]) -> str | None:
+    # 대화 리스트를 하나의 문장으로 합쳐 학습 입력으로 사용합니다.
+    # utterances/dialog/dialogue 등 일반적으로 쓰이는 필드를 순서대로 확인합니다.
+    utterances = row.get("utterances")
+    dialog = row.get("dialog")
+    dialogue = row.get("dialogue")
+    candidates = [utterances, dialog, dialogue]
+    for candidate in candidates:
+        if not isinstance(candidate, list):
+            continue
+        parts: list[str] = []
+        for item in candidate:
+            if not isinstance(item, str):
+                continue
+            cleaned = sanitize_text(item)
+            if cleaned:
+                parts.append(cleaned)
+        if parts:
+            return " ".join(parts)
+    return None
+
+
+def write_training_lines(path: Path, lines: list[str]) -> None:
+    # 1) 출력 경로 상위 디렉터리를 생성합니다.
+    # 2) 한 줄씩 저장해 이후 학습에서 재사용할 수 있게 합니다.
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as f:
         for line in lines:
             f.write(f"{line}\n")
+
+
+def prepare_datasets(
+    train_path: Path,
+    dataset_specs: list[dict[str, str]],
+    max_samples: int,
+) -> list[str]:
+    # 1) 데이터셋별로 학습 라인을 생성해 누적합니다.
+    # 2) 결과를 파일로 저장해 재실행 비용을 줄입니다.
+    all_lines: list[str] = []
+    for spec in dataset_specs:
+        dataset_name = spec["name"]
+        split_name = spec["split"]
+        print(f"데이터셋 로딩: {dataset_name} ({split_name})")
+        dataset = load_hf_dataset(dataset_name, split_name)
+        raw_rows = cast(list[dict[str, object]], list(dataset))
+        lines = build_training_lines(raw_rows, max_samples)
+        all_lines.extend(lines)
+    if not all_lines:
+        raise ValueError("여러 데이터셋에서 유효한 학습 라인을 만들지 못했습니다.")
+    write_training_lines(train_path, all_lines)
+    return all_lines
 
 
 def load_hf_dataset(dataset_name: str, split_name: str) -> list[dict[str, object]]:
@@ -557,12 +585,51 @@ def ask_resume(input_func) -> bool:
     return answer in {"y", "yes"}
 
 
+def resolve_output_dir(
+    output_dir_arg: str,
+    output_root_arg: str,
+    run_name_arg: str,
+) -> Path:
+    # 1) 사용자가 output_dir을 지정했으면 그 값을 그대로 사용합니다.
+    # 2) 지정하지 않았으면 output_root/run_name을 합쳐 경로를 만듭니다.
+    # 3) 결과 경로는 Path로 변환해 이후 로직을 단순화합니다.
+    if output_dir_arg:
+        return Path(output_dir_arg)
+    return Path(output_root_arg) / run_name_arg
+
+
+def update_latest_symlink(
+    output_root: Path,
+    run_name: str,
+    latest_name: str,
+) -> None:
+    # 1) output_root/run_name을 최신 대상 경로로 확정합니다.
+    # 2) 같은 위치에 latest_name 심볼릭 링크를 만들어 최신 경로를 가리키게 합니다.
+    # 3) 기존 링크가 있으면 제거하고 새 링크로 교체합니다.
+    target_path = output_root / run_name
+    link_path = output_root / latest_name
+    output_root.mkdir(parents=True, exist_ok=True)
+    if link_path.exists() or link_path.is_symlink():
+        link_path.unlink()
+    os.symlink(target_path.as_posix(), link_path.as_posix())
+
+
 def main() -> None:
     args = parse_args()
 
     train_path = Path(args.train_file)
-    output_dir = Path(args.output_dir)
+    output_dir = resolve_output_dir(
+        output_dir_arg=args.output_dir,
+        output_root_arg=args.output_root,
+        run_name_arg=args.run_name,
+    )
     device = resolve_device(args.device)
+
+    # 기본 로거는 INFO까지 출력하도록 설정합니다.
+    # 이미 핸들러가 있으면 덮어쓰지 않아 외부 설정을 존중합니다.
+    root_logger = logging.getLogger()
+    if not root_logger.handlers:
+        logging.basicConfig(level=logging.INFO)
 
     torch.manual_seed(42)
 
@@ -578,20 +645,24 @@ def main() -> None:
         args.batch_size = suggest_batch_size(device)
         print(f"자동 배치 크기 설정: {args.batch_size}")
 
+    dataset_specs = resolve_dataset_specs(
+        datasets_arg=args.datasets,
+        fallback_name=args.dataset,
+        fallback_split=args.dataset_split,
+    )
     needs_prepare = (
         args.force_prepare or not train_path.exists() or train_path.stat().st_size == 0
     )
     if needs_prepare:
         print("학습 파일이 없어 데이터셋을 다운로드합니다.")
-        prepare_dataset(
+        lines = prepare_datasets(
             train_path=train_path,
-            dataset_name=args.dataset,
-            split_name=args.dataset_split,
+            dataset_specs=dataset_specs,
             max_samples=args.dataset_max_samples,
         )
-
-    # 학습 데이터 라인을 먼저 읽어 토크나이저 교체에도 활용합니다.
-    lines = read_lines(train_path)
+    else:
+        # 이미 준비된 파일이 있으면 그대로 사용합니다.
+        lines = read_lines(train_path)
 
     if resume:
         print(f"체크포인트에서 재개합니다: {output_dir}")
@@ -609,15 +680,20 @@ def main() -> None:
         model = cast(
             PreTrainedModel, AutoModelForCausalLM.from_pretrained(args.checkpoint)
         )
-    if args.tokenizer_swap:
-        print("토크나이저 교체를 시작합니다.")
-        swap_ids = swap_tokenizer_with_dataset(
+    if resume and args.tokenizer_rebuild:
+        # 재개 학습에서는 기존 토크나이저를 그대로 유지합니다.
+        print("재개 학습에서는 토크나이저 재구성을 건너뜁니다.")
+    elif args.tokenizer_rebuild:
+        print("데이터셋 기반 토크나이저 재구성을 시작합니다.")
+        std = resolve_embedding_std(model)
+        tokenizer = rebuild_tokenizer_from_lines(
             tokenizer=tokenizer,
-            model=model,
             lines=lines,
-            max_tokens=args.tokenizer_swap_max_tokens,
+            vocab_size=args.tokenizer_vocab_size,
         )
-        print(f"토크나이저 교체 완료: {len(swap_ids)}개 토큰")
+        model.resize_token_embeddings(len(tokenizer), mean_resizing=False)
+        reinitialize_all_embeddings(model, std)
+        print(f"토크나이저 재구성 완료: vocab={len(tokenizer)}")
     if tokenizer.pad_token_id is None:
         if tokenizer.eos_token is None:
             raise ValueError("pad_token_id 설정을 위해 eos_token이 필요합니다.")
@@ -677,6 +753,12 @@ def main() -> None:
         save_checkpoint(model, tokenizer, output_dir)
         save_trainer_state(output_dir, epoch + 1, global_step, optimizer)
 
+    if args.latest_link and not args.output_dir:
+        update_latest_symlink(
+            output_root=Path(args.output_root),
+            run_name=args.run_name,
+            latest_name=args.latest_name,
+        )
     print(f"학습 완료. 저장 위치: {output_dir}")
 
 
